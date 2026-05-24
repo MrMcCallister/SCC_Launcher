@@ -19,22 +19,16 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pyinstaller pywebview
+        run: pip install pyinstaller
 
       - name: Build EXE
         working-directory: ${{ github.workspace }}
         run: |
-          pyinstaller `
-            --onefile `
-            --windowed `
-            --name "SCC_LAN_Launcher" `
-            --add-data "src;src" `
-            --hidden-import "webview.platforms.winforms" `
-            --hidden-import "clr" `
-            "${{ github.workspace }}\SCC_Launcher.py"
+          pyinstaller --onefile --windowed --name "SCC_LAN_Launcher" --add-data "src;src" "${{ github.workspace }}\SCC_Launcher.py"
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: SCC_LAN_Launcher
           path: dist\SCC_LAN_Launcher.exe
+          
