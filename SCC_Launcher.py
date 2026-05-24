@@ -947,11 +947,8 @@ class App(tk.Tk):
                     # Batch script is already running waiting for us to exit
                     self._ok(status, "Copying launcher... closing to complete install.")
                     messagebox.showinfo("Setup Complete",
-                        "Setup is complete!
-
-The launcher will now close and automatically "
+                        "Setup is complete!\n\nThe launcher will now close and automatically "
                         "reopen from your game directory.")
-                    sys.exit(0)
                 elif new_exe:
                     self._ok(status, "Setup complete!")
                     f.after(800, self._show_main)
