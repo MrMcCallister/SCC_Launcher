@@ -167,33 +167,15 @@ def is_wine():
     return False
 
 def wine_to_unix(path):
-    """Convert a Wine path like Z:\\home\\user\\... to /home/user/..."""
-    if path.startswith("Z:\\") or path.startswith("Z:/"):
-        return path[2:].replace("\\", "/").replace("\\", "/")
-    # Try using winepath if available
-    try:
-        result = subprocess.run(
-            ["winepath", "-u", path],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except:
-        pass
-    return path
+    """Convert a Wine path like Z:/home/user/... to /home/user/..."""
+    p = path.replace("\\", "/")
+    if len(p) >= 2 and p[1] == ":":
+        return p[2:] or "/"
+    return p
 
 def unix_to_wine(path):
-    """Convert a Unix path to Wine Z: path."""
-    try:
-        result = subprocess.run(
-            ["winepath", "-w", path],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-    except:
-        pass
-    return "Z:" + path.replace("/", "\\")
+    """Convert a Unix path to Wine Z:/path."""
+    return "Z:" + path
 
 def self_install(game_dir):
     """
@@ -215,6 +197,7 @@ def self_install(game_dir):
         return dest_exe, False
 
     running_under_wine = is_wine()
+    log(f"self_install: src_exe={src_exe}, dest_exe={dest_exe}, wine={running_under_wine}, platform={sys.platform}, frozen={getattr(sys,'frozen',False)}", game_dir=game_dir)
 
     if running_under_wine and getattr(sys, 'frozen', False):
         # Running as .exe under Wine on Linux
@@ -225,10 +208,11 @@ def self_install(game_dir):
         pid = os.getpid()
 
         sh_path = os.path.join(os.path.expanduser("~"), "_scc_install.sh")
-        # expanduser under Wine returns a Wine path — convert it
         sh_unix = wine_to_unix(sh_path)
         if not sh_unix.startswith("/"):
             sh_unix = os.path.join("/tmp", "_scc_install.sh")
+
+        log(f"self_install wine: src_unix={src_unix}, dest_unix={dest_unix}, dest_wine={dest_wine}, sh_unix={sh_unix}, pid={pid}", game_dir=game_dir)
 
         sh = f"""#!/bin/bash
 # Wait for Wine process to exit
@@ -920,7 +904,7 @@ class App(tk.Tk):
         nav.pack(fill="x", padx=20, pady=(0,20))
         self._btn(nav, "◀  BACK", lambda: self._show_step(4), bg=DIM2, fg=DIM).pack(side="left")
 
-        def _do_finish(shortcut_types, finish_btn):
+        def _do_finish(shortcut_types, finish_btn, _stop_spin=None):
             # Run on background thread to avoid freezing UI
             new_exe = None
             via_script = False
@@ -942,6 +926,7 @@ class App(tk.Tk):
 
             # Schedule UI update back on main thread
             def _on_done():
+                if _stop_spin: _stop_spin()
                 finish_btn.config(state="normal", text="✔  FINISH  &  LAUNCH")
                 if via_script:
                     # Batch script is already running waiting for us to exit
@@ -957,15 +942,33 @@ class App(tk.Tk):
                     f.after(800, self._show_main)
             f.after(0, _on_done)
 
+        # Spinner animation
+        spinner_chars = ["◆  ", " ◆ ", "  ◆"]
+        spinner_idx = [0]
+        spinner_id = [None]
+
+        def _spin():
+            if spinner_id[0] is not None:
+                c = spinner_chars[spinner_idx[0] % len(spinner_chars)]
+                status.config(text=f"{c} Copying launcher to game directory, please wait...")
+                spinner_idx[0] += 1
+                spinner_id[0] = f.after(300, _spin)
+
+        def _stop_spin():
+            if spinner_id[0] is not None:
+                f.after_cancel(spinner_id[0])
+                spinner_id[0] = None
+
         def finish():
             shortcut_types = []
             if desktop_var.get():   shortcut_types.append("desktop")
             if startmenu_var.get(): shortcut_types.append("startmenu")
 
-            finish_btn.config(state="disabled", text="Working...")
-            self._warn(status, "Copying launcher to game directory, please wait...")
+            finish_btn.config(state="disabled", text="Please wait...")
+            spinner_id[0] = "start"
+            _spin()
 
-            t = threading.Thread(target=_do_finish, args=(shortcut_types, finish_btn), daemon=True)
+            t = threading.Thread(target=_do_finish, args=(shortcut_types, finish_btn, _stop_spin), daemon=True)
             t.start()
 
         finish_btn = self._btn(nav, "✔  FINISH  &  LAUNCH", finish, large=True)
