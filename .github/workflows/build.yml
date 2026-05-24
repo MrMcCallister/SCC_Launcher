@@ -21,7 +21,7 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
  
-      - name: Build EXE
+       name: Build EXE
         run: |
           pyinstaller `
             --onefile `
@@ -29,6 +29,8 @@ jobs:
             --name "SCC_LAN_Launcher" `
             --add-data "src;src" `
             launcher.py
+            
+        working-directory: ${{ github.workspace }}
  
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
