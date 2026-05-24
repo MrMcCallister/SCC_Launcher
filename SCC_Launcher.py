@@ -845,7 +845,8 @@ class App(tk.Tk):
         self._btn(nav, "◀  BACK", lambda: self._show_step(2), bg=DIM2, fg=DIM).pack(side="left")
 
         def next_step():
-            if not installed[0] and not os.path.exists(get_exe_path(self.game_dir)):
+            # Use the in-memory flag — avoid blocking os.path.exists under Wine
+            if not installed[0]:
                 self._warn(status, "Please install files before continuing.")
                 return
             self._show_step(4)
@@ -870,17 +871,6 @@ class App(tk.Tk):
 
         net_var = tk.StringVar(value="Scanning...")
         net_map = {}
-
-        def populate_nets():
-            ips = get_local_ips()
-            if ips:
-                options = [label for label,ip in ips]
-                net_map.update({label:ip for label,ip in ips})
-                net_dropdown.config(values=options)
-                net_var.set(options[0])
-            else:
-                net_dropdown.config(values=["No interfaces detected"])
-                net_var.set("No interfaces detected")
 
         net_row = tk.Frame(net_panel, bg=PANEL)
         net_row.pack(fill="x", padx=8, pady=8)
