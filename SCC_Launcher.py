@@ -538,10 +538,20 @@ class App(tk.Tk):
             self._current_frame = frame
 
     def _slide_out(self, old_frame, build_fn):
+        # Show a blank loading frame instantly so the window doesn't go black
         old_frame.pack_forget()
-        new_frame = build_fn()
-        new_frame.pack(fill="both", expand=True)
-        self._current_frame = new_frame
+        loading = tk.Frame(self, bg=BG)
+        tk.Label(loading, text="◆", font=("Courier New", 24, "bold"),
+                 fg=ORANGE2, bg=BG).pack(expand=True)
+        loading.pack(fill="both", expand=True)
+        self._current_frame = loading
+        # Build real frame after tkinter has rendered the loading screen
+        def _build():
+            loading.pack_forget()
+            new_frame = build_fn()
+            new_frame.pack(fill="both", expand=True)
+            self._current_frame = new_frame
+        self.after(50, _build)
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _make_frame(self):
