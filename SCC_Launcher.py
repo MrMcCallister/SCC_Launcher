@@ -1,31 +1,8 @@
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import webview
 import os, sys, shutil, subprocess, configparser, traceback, datetime, socket
-import threading, time, re, json
-import struct
+import threading, re, json, base64
 
 # ── resource path ─────────────────────────────────────────────────────────────
-# Detect Wine once at startup so we can apply Linux-specific fixes throughout
-def _detect_wine():
-    if os.environ.get("WINELOADERNOEXEC"):
-        return True
-    if sys.platform == "win32" and os.path.exists("Z:\\"):
-        try:
-            import ctypes
-            ntdll = ctypes.windll.ntdll
-            return hasattr(ntdll, 'wine_get_version')
-        except:
-            pass
-    if sys.platform == "win32":
-        try:
-            if os.path.exists("/proc/version"):
-                return True
-        except:
-            pass
-    return False
-
-WINE = _detect_wine()
-
 def resource_path(relative):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative)
@@ -43,16 +20,14 @@ def load_settings():
         try:
             with open(SETTINGS_FILE, "r") as f:
                 return json.load(f)
-        except:
-            pass
+        except: pass
     return {}
 
 def save_settings(data):
     try:
         with open(SETTINGS_FILE, "w") as f:
             json.dump(data, f, indent=2)
-    except:
-        pass
+    except: pass
 
 # ── logging ───────────────────────────────────────────────────────────────────
 def get_log_file(game_dir=None):
@@ -63,12 +38,10 @@ def get_log_file(game_dir=None):
 def log(message, error=False, game_dir=None):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     prefix = "ERROR" if error else "INFO"
-    line = f"[{timestamp}] [{prefix}] {message}\n"
     try:
         with open(get_log_file(game_dir), "a", encoding="utf-8") as f:
-            f.write(line)
-    except:
-        pass
+            f.write(f"[{timestamp}] [{prefix}] {message}\n")
+    except: pass
 
 def log_exception(context, exc, game_dir=None):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -76,36 +49,26 @@ def log_exception(context, exc, game_dir=None):
     try:
         with open(get_log_file(game_dir), "a", encoding="utf-8") as f:
             f.write(f"[{timestamp}] [ERROR] {context}: {exc}\n{tb}\n")
-    except:
-        pass
+    except: pass
 
 # ── network ───────────────────────────────────────────────────────────────────
 def get_local_ips():
-    """Return list of (interface_name, ip) for all active non-loopback interfaces."""
     ips = []
     seen = set()
     try:
         hostname = socket.gethostname()
-        all_ips = socket.getaddrinfo(hostname, None)
-        for item in all_ips:
+        for item in socket.getaddrinfo(hostname, None):
             ip = item[4][0]
             if ip not in seen and not ip.startswith("127.") and ":" not in ip:
                 seen.add(ip)
-                if ip.startswith("25."):
-                    label = f"Hamachi  ({ip})"
-                elif ip.startswith("100."):
-                    label = f"ZeroTier/Tailscale  ({ip})"
-                elif ip.startswith("10."):
-                    label = f"VPN/LAN  ({ip})"
-                elif ip.startswith("192.168."):
-                    label = f"Local Network  ({ip})"
-                elif ip.startswith("172."):
-                    label = f"Private Network  ({ip})"
-                else:
-                    label = f"Network  ({ip})"
-                ips.append((label, ip))
-    except:
-        pass
+                if ip.startswith("25."): label = f"Hamachi ({ip})"
+                elif ip.startswith("100."): label = f"ZeroTier/Tailscale ({ip})"
+                elif ip.startswith("10."): label = f"VPN/LAN ({ip})"
+                elif ip.startswith("192.168."): label = f"Local Network ({ip})"
+                elif ip.startswith("172."): label = f"Private Network ({ip})"
+                else: label = f"Network ({ip})"
+                ips.append({"label": label, "ip": ip})
+    except: pass
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.settimeout(1)
@@ -113,64 +76,35 @@ def get_local_ips():
         ip = s.getsockname()[0]
         s.close()
         if ip and ip not in seen:
-            ips.append((f"Primary Network  ({ip})", ip))
-    except:
-        pass
+            ips.append({"label": f"Primary Network ({ip})", "ip": ip})
+    except: pass
     return ips
 
-def populate_nets_async(widget_ref, net_var, net_map, dropdown_widget):
-    """Fetch network interfaces in a background thread then update UI safely."""
-    def _fetch():
-        ips = get_local_ips()
-        def _update():
-            try:
-                if ips:
-                    options = [lbl for lbl, ip in ips]
-                    net_map.update({lbl: ip for lbl, ip in ips})
-                    dropdown_widget.config(values=options)
-                    net_var.set(options[0])
-                else:
-                    dropdown_widget.config(values=["No interfaces detected"])
-                    net_var.set("No interfaces detected")
-            except:
-                pass
-        try:
-            widget_ref.after(0, _update)
-        except:
-            pass
-    threading.Thread(target=_fetch, daemon=True).start()
-
 # ── ini helpers ───────────────────────────────────────────────────────────────
-_converted_ini_cache = set()
+_converted_cache = set()
 
 def _convert_comments(ini_path):
-    """Convert // comments to # only once per session per file."""
-    if ini_path in _converted_ini_cache:
+    if ini_path in _converted_cache:
         return
     try:
         with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
         if "//" not in content:
-            _converted_ini_cache.add(ini_path)
+            _converted_cache.add(ini_path)
             return
         converted = re.sub(r"^(\s*)//", r"\1#", content, flags=re.MULTILINE)
         if converted != content:
             with open(ini_path, "w", encoding="utf-8") as f:
                 f.write(converted)
-        _converted_ini_cache.add(ini_path)
-    except:
-        pass
+        _converted_cache.add(ini_path)
+    except: pass
 
-def get_ini_path(game_dir):
-    return os.path.join(game_dir, INI_REL)
-
-def get_exe_path(game_dir):
-    return os.path.join(game_dir, EXE_REL)
+def get_ini_path(game_dir): return os.path.join(game_dir, INI_REL)
+def get_exe_path(game_dir): return os.path.join(game_dir, EXE_REL)
 
 def read_server_addr(game_dir):
     ini_path = get_ini_path(game_dir)
-    if not os.path.exists(ini_path):
-        return ""
+    if not os.path.exists(ini_path): return ""
     _convert_comments(ini_path)
     cfg = configparser.ConfigParser()
     cfg.read(ini_path, encoding="utf-8")
@@ -196,1095 +130,1314 @@ def copy_dlc_to_dir(dlc_folder, game_dir):
     for item in os.listdir(dlc_folder):
         s = os.path.join(dlc_folder, item)
         d = os.path.join(game_dir, item)
-        if os.path.isdir(s):
-            shutil.copytree(s, d, dirs_exist_ok=True)
-        else:
-            shutil.copy2(s, d)
+        if os.path.isdir(s): shutil.copytree(s, d, dirs_exist_ok=True)
+        else: shutil.copy2(s, d)
 
-def is_wine():
-    """Detect if we are running inside Wine on Linux."""
-    # Wine sets WINELOADERNOEXEC or exposes a wine registry path
-    if os.environ.get("WINELOADERNOEXEC"):
-        return True
-    # Check for Wine-specific file
-    if os.path.exists("/proc/version"):
-        try:
-            with open("/proc/version") as f:
-                return True  # /proc exists = real Linux kernel under Wine
-        except:
-            pass
-    # Check for Z: drive mapping (Wine maps / to Z:)
-    if sys.platform == "win32" and os.path.exists("Z:\\"):
-        return True
-    return False
-
-def wine_to_unix(path):
-    """Convert a Wine path like Z:/home/user/... to /home/user/..."""
-    p = path.replace("\\", "/")
-    if len(p) >= 2 and p[1] == ":":
-        return p[2:] or "/"
-    return p
-
-def unix_to_wine(path):
-    """Convert a Unix path to Wine Z:/path."""
-    return "Z:" + path
-
-def self_install(game_dir):
-    """
-    Copy this launcher exe into src/system/ of the game directory.
-    Handles Windows native, Wine on Linux, and plain Linux.
-    Returns (dest_exe, needs_relaunch_via_script).
-    """
-    if getattr(sys, 'frozen', False):
-        src_exe = sys.executable
-    else:
-        src_exe = os.path.abspath(__file__)
-
-    dest_dir = os.path.join(game_dir, "src", "system")
-    os.makedirs(dest_dir, exist_ok=True)
-    dest_exe = os.path.join(dest_dir, os.path.basename(src_exe))
-
-    # Already running from destination — nothing to do
-    if os.path.abspath(src_exe).lower() == os.path.abspath(dest_exe).lower():
-        return dest_exe, False
-
-    running_under_wine = is_wine()
-    log(f"self_install: src_exe={src_exe}, dest_exe={dest_exe}, wine={running_under_wine}, platform={sys.platform}, frozen={getattr(sys,'frozen',False)}", game_dir=game_dir)
-
-    if running_under_wine and getattr(sys, 'frozen', False):
-        # Running as .exe under Wine on Linux
-        # Convert paths to real Linux paths for the shell script
-        src_unix  = wine_to_unix(src_exe)
-        dest_unix = wine_to_unix(dest_exe)
-        dest_wine = unix_to_wine(dest_unix)
-        pid = os.getpid()
-
-        sh_path = os.path.join(os.path.expanduser("~"), "_scc_install.sh")
-        sh_unix = wine_to_unix(sh_path)
-        if not sh_unix.startswith("/"):
-            sh_unix = os.path.join("/tmp", "_scc_install.sh")
-
-        log(f"self_install wine: src_unix={src_unix}, dest_unix={dest_unix}, dest_wine={dest_wine}, sh_unix={sh_unix}, pid={pid}", game_dir=game_dir)
-
-        sh = f"""#!/bin/bash
-# Wait for Wine process to exit
-while kill -0 {pid} 2>/dev/null; do
-    sleep 0.5
-done
-sleep 1
-cp -f "{src_unix}" "{dest_unix}"
-chmod +x "{dest_unix}"
-# Relaunch via Wine using the wine path
-WINEPREFIX="$(dirname $(dirname $(dirname $(dirname "{dest_unix}"))))" wine "{dest_wine}" &
-rm -- "$0"
-"""
-        with open(sh_unix, "w") as sf:
-            sf.write(sh)
-        os.chmod(sh_unix, 0o755)
-        subprocess.Popen(["/bin/bash", sh_unix],
-                         start_new_session=True,
-                         close_fds=True)
-        return dest_exe, True
-
-    elif sys.platform == "win32" and getattr(sys, 'frozen', False):
-        # Native Windows — use batch script
-        bat_path = os.path.join(os.path.expanduser("~"), "_scc_install.bat")
-        bat = f"""@echo off
-:wait
-timeout /t 1 /nobreak >nul
-tasklist /fi "PID eq {os.getpid()}" | find "{os.getpid()}" >nul 2>&1
-if not errorlevel 1 goto wait
-copy /y "{src_exe}" "{dest_exe}"
-start "" "{dest_exe}"
-del "%~f0"
-"""
-        with open(bat_path, "w") as bf:
-            bf.write(bat)
-        subprocess.Popen(["cmd", "/c", bat_path],
-                         creationflags=subprocess.CREATE_NO_WINDOW,
-                         close_fds=True)
-        return dest_exe, True
-
-    else:
-        # Plain Linux .py script or non-frozen — direct copy is fine
-        shutil.copy2(src_exe, dest_exe)
-        try:
-            os.chmod(dest_exe, 0o755)
-        except:
-            pass
-        return dest_exe, False
-
-def create_shortcut_windows(target, name, shortcut_types):
-    """Create Windows shortcuts using PowerShell. Non-blocking under Wine."""
-    results = []
-    for stype in shortcut_types:
-        try:
-            if stype == "desktop":
-                dest = os.path.join(os.path.expanduser("~"), "Desktop", f"{name}.lnk")
-            elif stype == "startmenu":
-                dest = os.path.join(os.environ.get("APPDATA",""), "Microsoft","Windows","Start Menu","Programs", f"{name}.lnk")
-            else:
-                continue
-            ps = f'''$ws = New-Object -ComObject WScript.Shell
+# ── shortcuts ─────────────────────────────────────────────────────────────────
+def create_shortcuts(target, shortcut_types, name="SCC LAN Launcher"):
+    if sys.platform == "win32":
+        for stype in shortcut_types:
+            try:
+                if stype == "desktop":
+                    dest = os.path.join(os.path.expanduser("~"), "Desktop", f"{name}.lnk")
+                elif stype == "startmenu":
+                    dest = os.path.join(os.environ.get("APPDATA",""), "Microsoft","Windows","Start Menu","Programs", f"{name}.lnk")
+                else: continue
+                ps = f'''$ws = New-Object -ComObject WScript.Shell
 $s = $ws.CreateShortcut('{dest}')
 $s.TargetPath = '{target}'
 $s.WorkingDirectory = '{os.path.dirname(target)}'
 $s.Save()'''
-            if WINE:
-                # Non-blocking under Wine — PowerShell is slow to spawn
                 subprocess.Popen(["powershell", "-Command", ps],
-                                 stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL)
-            else:
-                subprocess.run(["powershell", "-Command", ps],
-                               capture_output=True, timeout=10)
-            results.append(stype)
-        except:
-            pass
-    return results
-
-def create_shortcut_linux(target, name, shortcut_types):
-    """Create Linux .desktop shortcuts."""
-    results = []
-    desktop_entry = f"""[Desktop Entry]
-Name={name}
-Exec="{target}"
-Type=Application
-Terminal=false
-Categories=Game;
-"""
-    for stype in shortcut_types:
-        try:
-            if stype == "desktop":
-                dest = os.path.join(os.path.expanduser("~"), "Desktop", f"{name}.desktop")
-            elif stype == "startmenu":
-                dest = os.path.join(os.path.expanduser("~"), ".local", "share", "applications", f"{name}.desktop")
-            else:
-                continue
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            with open(dest, "w") as f:
-                f.write(desktop_entry)
-            os.chmod(dest, 0o755)
-            results.append(stype)
-        except:
-            pass
-    return results
-
-def create_shortcuts(target, shortcut_types, name="SCC LAN Launcher"):
-    if sys.platform == "win32":
-        return create_shortcut_windows(target, name, shortcut_types)
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except: pass
     else:
-        return create_shortcut_linux(target, name, shortcut_types)
+        entry = f"[Desktop Entry]\nName={name}\nExec=\"{target}\"\nType=Application\nTerminal=false\nCategories=Game;\n"
+        for stype in shortcut_types:
+            try:
+                if stype == "desktop":
+                    dest = os.path.join(os.path.expanduser("~"), "Desktop", f"{name}.desktop")
+                elif stype == "startmenu":
+                    dest = os.path.join(os.path.expanduser("~"), ".local", "share", "applications", f"{name}.desktop")
+                else: continue
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                with open(dest, "w") as f: f.write(entry)
+                os.chmod(dest, 0o755)
+            except: pass
 
-def relaunch(new_exe, game_dir):
-    """Relaunch from new_exe location and exit current instance."""
-    try:
-        if sys.platform == "win32":
-            subprocess.Popen([new_exe], cwd=os.path.dirname(new_exe))
-        else:
-            subprocess.Popen([new_exe], cwd=os.path.dirname(new_exe))
-        sys.exit(0)
-    except Exception as e:
-        log_exception("Relaunch failed", e, game_dir)
-
-# ── theme ─────────────────────────────────────────────────────────────────────
-BG        = "#080808"
-BG2       = "#0f0f0f"
-PANEL     = "#111111"
-ORANGE    = "#E8722A"
-ORANGE2   = "#a04d18"
-ORANGE3   = "#3a1a08"
-WHITE     = "#F0EEE8"
-DIM       = "#444440"
-DIM2      = "#222220"
-GREEN_HUD = "#4aff91"
-RED_HUD   = "#ff4a4a"
-
-FONT_TITLE  = ("Courier New", 22, "bold")
-FONT_HEAD   = ("Courier New", 11, "bold")
-FONT_BODY   = ("Courier New", 9)
-FONT_SMALL  = ("Courier New", 7)
-FONT_MONO   = ("Courier New", 11, "bold")
-FONT_BTN    = ("Courier New", 9, "bold")
-FONT_BTN_LG = ("Courier New", 11, "bold")
-
-# ── animated canvas elements ──────────────────────────────────────────────────
-class HUDCanvas(tk.Canvas):
-    """Canvas with corner brackets and optional scanlines."""
-    def __init__(self, parent, width=480, height=60, color=ORANGE, **kwargs):
-        super().__init__(parent, width=width, height=height,
-                         bg=BG, highlightthickness=0, **kwargs)
-        self._w = width
-        self._h = height
-        self._color = color
-        self._draw_brackets()
-
-    def _draw_brackets(self):
-        self.delete("brackets")
-        c = self._color
-        w, h = self._w, self._h
-        sz = 12
-        t = 1
-        corners = [
-            [(0,sz,0,0,sz,0)],
-            [(w-sz,0,w,0,w,sz)],
-            [(0,h-sz,0,h,sz,h)],
-            [(w-sz,h,w,h,w,h-sz)],
-        ]
-        for pts in corners:
-            self.create_line(*pts[0], fill=c, width=t, tags="brackets")
-
-class FlickerLabel(tk.Label):
-    """Label that flickers on appearance like a CRT boot."""
-    def __init__(self, parent, text="", flicker_done_cb=None, **kwargs):
-        super().__init__(parent, text="", **kwargs)
-        self._full = text
-        self._cb = flicker_done_cb
-        self._after_id = None
-
-    def start(self, delay=80):
-        self._flicker(0, delay)
-
-    def _flicker(self, step, delay):
-        if step < 4:
-            vis = step % 2 == 0
-            self.config(text=self._full if vis else "")
-            self._after_id = self.after(delay, self._flicker, step+1, delay)
-        else:
-            self.config(text=self._full)
-            if self._cb:
-                self._cb()
-
-class TypewriterLabel(tk.Label):
-    """Types out text character by character."""
-    def __init__(self, parent, text="", speed=40, done_cb=None, **kwargs):
-        super().__init__(parent, text="", **kwargs)
-        self._full = text
-        self._speed = speed
-        self._cb = done_cb
-        self._idx = 0
-
-    def start(self, delay=0):
-        self.after(delay, self._tick)
-
-    def _tick(self):
-        if self._idx <= len(self._full):
-            self.config(text=self._full[:self._idx] + ("_" if self._idx < len(self._full) else ""))
-            self._idx += 1
-            self.after(self._speed, self._tick)
-        else:
-            self.config(text=self._full)
-            if self._cb:
-                self._cb()
-
-# ── context menu for entry ────────────────────────────────────────────────────
-def add_context_menu(entry_widget):
-    menu = tk.Menu(entry_widget, tearoff=0,
-                   bg=PANEL, fg=WHITE, activebackground=ORANGE,
-                   activeforeground=BG, font=FONT_BODY,
-                   relief="flat", bd=0)
-    menu.add_command(label="Cut",        command=lambda: entry_widget.event_generate("<<Cut>>"))
-    menu.add_command(label="Copy",       command=lambda: entry_widget.event_generate("<<Copy>>"))
-    menu.add_command(label="Paste",      command=lambda: entry_widget.event_generate("<<Paste>>"))
-    menu.add_separator()
-    menu.add_command(label="Select All", command=lambda: (entry_widget.select_range(0, "end"), entry_widget.icursor("end")))
-
-    def show(event):
-        menu.tk_popup(event.x_root, event.y_root)
-    entry_widget.bind("<Button-3>", show)
-
-# ── main app ──────────────────────────────────────────────────────────────────
-class App(tk.Tk):
+# ── API exposed to JS ─────────────────────────────────────────────────────────
+class Api:
     def __init__(self):
-        super().__init__()
-        self.title("SCC LAN Launcher")
-        self.configure(bg=BG)
-        self.resizable(False, False)
-
         self.settings = load_settings()
         self.game_dir = self.settings.get("game_dir", "")
         self.setup_done = self.settings.get("setup_done", False)
-
-        # Validate saved dir still exists
         if self.game_dir and not os.path.isdir(self.game_dir):
             self.game_dir = ""
             self.setup_done = False
-
         log("Launcher started.", game_dir=self.game_dir or None)
 
-        self._current_frame = None
-        self._step = 0
+    def get_state(self):
+        return {
+            "game_dir": self.game_dir,
+            "setup_done": self.setup_done,
+            "files_present": os.path.exists(get_exe_path(self.game_dir)) if self.game_dir else False
+        }
 
-        if self.setup_done and self.game_dir:
-            self._show_main()
+    def browse_directory(self):
+        result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+        if result and len(result) > 0:
+            d = result[0]
+            if os.path.basename(d).lower() == "src":
+                return {"ok": False, "error": "Please select the main game folder, not src/"}
+            self.game_dir = d
+            self.settings["game_dir"] = d
+            save_settings(self.settings)
+            log(f"Game directory set: {d}", game_dir=d)
+            return {"ok": True, "path": d}
+        return {"ok": False, "error": "No directory selected"}
+
+    def browse_dlc_directory(self):
+        result = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+        if result and len(result) > 0:
+            return {"ok": True, "path": result[0]}
+        return {"ok": False, "error": "No directory selected"}
+
+    def install_files(self):
+        if not self.game_dir:
+            return {"ok": False, "error": "No game directory set"}
+        try:
+            log(f"Installing files to: {self.game_dir}", game_dir=self.game_dir)
+            copy_src_to_dir(self.game_dir)
+            log("Files copied successfully.", game_dir=self.game_dir)
+            return {"ok": True}
+        except Exception as e:
+            log_exception("Install failed", e, self.game_dir)
+            return {"ok": False, "error": str(e)}
+
+    def install_dlc(self, dlc_path):
+        if not self.game_dir:
+            return {"ok": False, "error": "No game directory set"}
+        try:
+            log(f"Installing DLC from: {dlc_path}", game_dir=self.game_dir)
+            copy_dlc_to_dir(dlc_path, self.game_dir)
+            log("DLC installed successfully.", game_dir=self.game_dir)
+            return {"ok": True}
+        except Exception as e:
+            log_exception("DLC install failed", e, self.game_dir)
+            return {"ok": False, "error": str(e)}
+
+    def get_server_addr(self):
+        if not self.game_dir: return {"ok": True, "ip": ""}
+        try:
+            ip = read_server_addr(self.game_dir)
+            return {"ok": True, "ip": ip}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def save_server_addr(self, ip):
+        if not self.game_dir:
+            return {"ok": False, "error": "No game directory set"}
+        try:
+            write_server_addr(self.game_dir, ip)
+            log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
+            return {"ok": True}
+        except Exception as e:
+            log_exception("Save IP failed", e, self.game_dir)
+            return {"ok": False, "error": str(e)}
+
+    def get_local_ips(self):
+        try:
+            return {"ok": True, "ips": get_local_ips()}
+        except Exception as e:
+            return {"ok": False, "ips": []}
+
+    def launch_helper(self):
+        if not self.game_dir:
+            return {"ok": False, "error": "No game directory set"}
+        exe = get_exe_path(self.game_dir)
+        if not os.path.exists(exe):
+            return {"ok": False, "error": f"Cannot find: {exe}"}
+        try:
+            log(f"Launching: {exe}", game_dir=self.game_dir)
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
+            return {"ok": True}
+        except Exception as e:
+            log_exception("Launch failed", e, self.game_dir)
+            return {"ok": False, "error": str(e)}
+
+    def finish_setup(self, launcher_shortcut, helper_shortcut, desktop, startmenu):
+        shortcut_types = []
+        if desktop: shortcut_types.append("desktop")
+        if startmenu: shortcut_types.append("startmenu")
+        if getattr(sys, "frozen", False):
+            launcher_exe = sys.executable
         else:
-            self._show_step(0)
-
-    def _gd(self):
-        return self.game_dir if self.game_dir and os.path.isdir(self.game_dir) else None
-
-    def _save(self):
-        self.settings["game_dir"] = self.game_dir
-        self.settings["setup_done"] = self.setup_done
+            launcher_exe = os.path.abspath(__file__)
+        helper_exe = get_exe_path(self.game_dir)
+        if launcher_shortcut and shortcut_types:
+            try:
+                create_shortcuts(launcher_exe, shortcut_types, "SCC LAN Launcher")
+                log(f"Launcher shortcuts: {shortcut_types}", game_dir=self.game_dir)
+            except Exception as e:
+                log_exception("Launcher shortcut failed", e, self.game_dir)
+        if helper_shortcut and shortcut_types:
+            try:
+                create_shortcuts(helper_exe, shortcut_types, "SCC LAN Helper")
+                log(f"Helper shortcuts: {shortcut_types}", game_dir=self.game_dir)
+            except Exception as e:
+                log_exception("Helper shortcut failed", e, self.game_dir)
+        self.setup_done = True
+        self.settings["setup_done"] = True
         save_settings(self.settings)
-
-    # ── frame transitions ─────────────────────────────────────────────────────
-    def _transition(self, build_fn):
-        if self._current_frame:
-            self._slide_out(self._current_frame, build_fn)
-        else:
-            frame = build_fn()
-            frame.pack(fill="both", expand=True)
-            self._current_frame = frame
-
-    def _slide_out(self, old_frame, build_fn):
-        # Show a blank loading frame instantly so the window doesn't go black
-        old_frame.pack_forget()
-        loading = tk.Frame(self, bg=BG)
-        tk.Label(loading, text="◆", font=("Courier New", 24, "bold"),
-                 fg=ORANGE2, bg=BG).pack(expand=True)
-        loading.pack(fill="both", expand=True)
-        self._current_frame = loading
-        # Build real frame after tkinter has rendered the loading screen
-        def _build():
-            loading.pack_forget()
-            new_frame = build_fn()
-            new_frame.pack(fill="both", expand=True)
-            self._current_frame = new_frame
-        self.after(50, _build)
-
-    # ── helpers ───────────────────────────────────────────────────────────────
-    def _make_frame(self):
-        f = tk.Frame(self, bg=BG)
-        return f
-
-    def _divider(self, parent):
-        tk.Frame(parent, bg=ORANGE2, height=1).pack(fill="x", padx=20, pady=8)
-
-    def _section_label(self, parent, text):
-        tk.Label(parent, text=text, font=FONT_SMALL,
-                 fg=DIM, bg=BG).pack(anchor="w", padx=20, pady=(8,2))
-
-    def _hud_panel(self, parent, pady=(4,4)):
-        outer = tk.Frame(parent, bg=ORANGE2, pady=1)
-        outer.pack(fill="x", padx=20, pady=pady)
-        inner = tk.Frame(outer, bg=PANEL)
-        inner.pack(fill="x", padx=1, pady=1)
-        return inner
-
-    def _btn(self, parent, text, cmd, bg=ORANGE3, fg=ORANGE, large=False, width=None):
-        kw = {"width": width} if width else {}
-        b = tk.Button(parent, text=text, command=cmd,
-                      font=FONT_BTN_LG if large else FONT_BTN,
-                      bg=bg, fg=fg,
-                      activebackground=fg, activeforeground=BG,
-                      relief="flat", bd=0, cursor="hand2",
-                      padx=14, pady=10 if large else 7, **kw)
-        return b
-
-    def _status_label(self, parent):
-        lbl = tk.Label(parent, text="", font=FONT_SMALL, fg=ORANGE, bg=BG)
-        lbl.pack(anchor="w", padx=20, pady=(2,0))
-        return lbl
-
-    def _ok(self, lbl, msg):
-        lbl.config(text=f"✔  {msg}", fg=GREEN_HUD)
-
-    def _err(self, lbl, msg):
-        lbl.config(text=f"✘  {msg}", fg=RED_HUD)
-
-    def _warn(self, lbl, msg):
-        lbl.config(text=f"⚠  {msg}", fg=ORANGE)
-
-    # ── SETUP HEADER ──────────────────────────────────────────────────────────
-    def _setup_header(self, parent, step_num, total=6):
-        # Top bar
-        bar = tk.Frame(parent, bg=BG2)
-        bar.pack(fill="x")
-
-        tk.Label(bar, text="TOM CLANCY'S", font=FONT_SMALL,
-                 fg=DIM, bg=BG2).pack(side="left", padx=(20,4), pady=8)
-        tk.Label(bar, text="SPLINTER CELL: CONVICTION", font=("Courier New", 8, "bold"),
-                 fg=ORANGE, bg=BG2).pack(side="left", pady=8)
-
-        step_txt = f"SETUP  {step_num}/{total}"
-        tk.Label(bar, text=step_txt, font=FONT_SMALL,
-                 fg=DIM, bg=BG2).pack(side="right", padx=20, pady=8)
-
-        tk.Frame(parent, bg=ORANGE, height=2).pack(fill="x")
-
-        # Progress dots
-        dot_row = tk.Frame(parent, bg=BG)
-        dot_row.pack(pady=(10,0))
-        for i in range(total):
-            color = ORANGE if i < step_num else DIM2
-            tk.Label(dot_row, text="◆" if i < step_num else "◇",
-                     font=("Courier New", 8), fg=color, bg=BG).pack(side="left", padx=3)
-
-    def _main_header(self, parent):
-        bar = tk.Frame(parent, bg=BG2)
-        bar.pack(fill="x")
-        tk.Label(bar, text="TOM CLANCY'S", font=FONT_SMALL,
-                 fg=DIM, bg=BG2).pack(side="left", padx=(20,4), pady=8)
-        tk.Label(bar, text="SPLINTER CELL: CONVICTION", font=("Courier New", 8, "bold"),
-                 fg=ORANGE, bg=BG2).pack(side="left", pady=8)
-        tk.Label(bar, text="LAN LAUNCHER", font=FONT_SMALL,
-                 fg=DIM, bg=BG2).pack(side="right", padx=20, pady=8)
-        tk.Frame(parent, bg=ORANGE, height=2).pack(fill="x")
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # SETUP STEPS
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _show_step(self, step):
-        self._step = step
-        steps = [
-            self._build_step0_welcome,
-            self._build_step1_directory,
-            self._build_step2_dlc,
-            self._build_step3_install,
-            self._build_step4_ip,
-            self._build_step5_shortcuts,
-        ]
-        self._transition(steps[step])
-
-    # ── Step 0: Welcome ───────────────────────────────────────────────────────
-    def _build_step0_welcome(self):
-        f = self._make_frame()
-        self._setup_header(f, 0, 6)
-
-        # Eye / silhouette art
-        art = tk.Canvas(f, width=480, height=120, bg=BG, highlightthickness=0)
-        art.pack(pady=(20,0))
-
-        # Draw stylized eye
-        cx, cy = 240, 60
-        art.create_oval(cx-80, cy-30, cx+80, cy+30, outline=ORANGE, width=2)
-        art.create_oval(cx-20, cy-20, cx+20, cy+20, fill=ORANGE, outline="")
-        art.create_oval(cx-8, cy-8, cx+8, cy+8, fill=BG, outline="")
-        # corner brackets
-        for x1,y1,x2,y2,x3,y3 in [
-            (0,20,0,0,20,0),(460,0,480,0,480,20),
-            (0,100,0,120,20,120),(460,120,480,120,480,100)]:
-            art.create_line(x1,y1,x2,y2,x3,y3, fill=ORANGE2, width=1)
-
-        # Ghost text
-        ghost = tk.Label(f, text="[ LAST KNOWN POSITION ]",
-                         font=("Courier New", 8), fg=ORANGE2, bg=BG)
-        ghost.pack()
-
-        # Title flicker
-        title = FlickerLabel(f, text="SCC  LAN  LAUNCHER",
-                             font=FONT_TITLE, fg=ORANGE, bg=BG)
-        title.pack(pady=(16, 4))
-
-        # Typewriter subtitle
-        sub = TypewriterLabel(f,
-            text="FOURTH ECHELON  ·  NETWORK CONFIGURATION SYSTEM",
-            font=FONT_SMALL, fg=DIM, bg=BG, speed=35)
-        sub.pack()
-
-        self._divider(f)
-
-        desc = tk.Label(f,
-            text="This utility will configure your LAN connection\nfor Splinter Cell: Conviction FusionFix.\n\nComplete each step to initialize the system.",
-            font=FONT_BODY, fg=WHITE, bg=BG, justify="center")
-        desc.pack(pady=12)
-
-        btn_row = tk.Frame(f, bg=BG)
-        btn_row.pack(pady=(8, 20))
-        self._btn(btn_row, "▶  INITIALIZE SETUP", lambda: self._show_step(1),
-                  large=True).pack()
-
-        def _start_anim():
-            title.start()
-            sub.start(delay=600)
-        f.after(100, _start_anim)
-        return f
-
-    # ── Step 1: Directory ─────────────────────────────────────────────────────
-    def _build_step1_directory(self):
-        f = self._make_frame()
-        self._setup_header(f, 1, 6)
-
-        tk.Label(f, text="GAME DIRECTORY", font=FONT_HEAD,
-                 fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
-        tk.Label(f,
-            text="Select the root folder of your Splinter Cell: Conviction installation.\nDo NOT select the src/ subfolder — select the main game folder.",
-            font=FONT_BODY, fg=DIM, bg=BG, justify="left").pack(anchor="w", padx=20, pady=(0,12))
-
-        panel = self._hud_panel(f)
-        path_var = tk.StringVar(value=self.game_dir or "No directory selected")
-        path_lbl = tk.Label(panel, textvariable=path_var, font=FONT_BODY,
-                            fg=WHITE, bg=PANEL, anchor="w", wraplength=400, justify="left")
-        path_lbl.pack(fill="x", padx=12, pady=10)
-
-        status = self._status_label(f)
-
-        def browse():
-            d = filedialog.askdirectory(title="Select Game Directory")
-            if d:
-                # Warn if they selected src/
-                if os.path.basename(d).lower() == "src":
-                    self._warn(status, "Please select the main game folder, not src/")
-                    return
-                self.game_dir = d
-                path_var.set(d)
-                self._ok(status, "Directory set.")
-                log(f"Game directory set: {d}", game_dir=d)
-
-        btn_row = tk.Frame(f, bg=BG)
-        btn_row.pack(anchor="w", padx=20, pady=(8,0))
-        self._btn(btn_row, "📁  BROWSE", browse).pack(side="left")
-
-        self._divider(f)
-
-        nav = tk.Frame(f, bg=BG)
-        nav.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(nav, "◀  BACK", lambda: self._show_step(0),
-                  bg=DIM2, fg=DIM).pack(side="left")
-
-        def next_step():
-            if not self.game_dir or not os.path.isdir(self.game_dir):
-                self._warn(status, "Please select a valid game directory first.")
-                return
-            self._save()
-            self._show_step(2)
-
-        self._btn(nav, "NEXT  ▶", next_step, large=False).pack(side="right")
-        return f
-
-    # ── Step 2: DLC ───────────────────────────────────────────────────────────
-    def _build_step2_dlc(self):
-        f = self._make_frame()
-        self._setup_header(f, 2, 6)
-
-        tk.Label(f, text="OPTIONAL DLC", font=FONT_HEAD,
-                 fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
-        tk.Label(f,
-            text="Install the Insurgency Pack DLC before copying main files.\nExtract the DLC .zip first, then select the extracted folder.\nYou can also skip this and install DLC later from the main screen.",
-            font=FONT_BODY, fg=DIM, bg=BG, justify="left").pack(anchor="w", padx=20, pady=(0,12))
-
-        status = self._status_label(f)
-
-        def install_dlc():
-            dlc = filedialog.askdirectory(title="Select Extracted Insurgency Pack DLC Folder")
-            if not dlc:
-                return
-            dlc_btn.config(state="disabled", text="Installing...")
-            self._warn(status, "Copying DLC files, please wait...")
-            def _do():
-                try:
-                    log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
-                    copy_dlc_to_dir(dlc, self.game_dir)
-                    log("DLC installed successfully.", game_dir=self.game_dir)
-                    f.after(0, lambda: (
-                        dlc_btn.config(state="normal", text="📦  INSTALL INSURGENCY PACK DLC"),
-                        self._ok(status, "Insurgency Pack DLC installed.")
-                    ))
-                except Exception as e:
-                    log_exception("DLC install failed", e, self.game_dir)
-                    f.after(0, lambda: (
-                        dlc_btn.config(state="normal", text="📦  INSTALL INSURGENCY PACK DLC"),
-                        self._err(status, "DLC install failed. Check debug log.")
-                    ))
-            threading.Thread(target=_do, daemon=True).start()
-
-        btn_row = tk.Frame(f, bg=BG)
-        btn_row.pack(anchor="w", padx=20, pady=(8,0))
-        dlc_btn = self._btn(btn_row, "📦  INSTALL INSURGENCY PACK DLC",
-                  install_dlc, bg="#1a222a", fg="#6fa8cf")
-        dlc_btn.pack(side="left")
-
-        self._divider(f)
-
-        nav = tk.Frame(f, bg=BG)
-        nav.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(nav, "◀  BACK", lambda: self._show_step(1), bg=DIM2, fg=DIM).pack(side="left")
-        self._btn(nav, "SKIP  ▶", lambda: self._show_step(3), bg=DIM2, fg=DIM).pack(side="right", padx=(0,8))
-        self._btn(nav, "NEXT  ▶", lambda: self._show_step(3)).pack(side="right")
-        return f
-
-    # ── Step 3: Install files ─────────────────────────────────────────────────
-    def _build_step3_install(self):
-        f = self._make_frame()
-        self._setup_header(f, 3, 6)
-
-        tk.Label(f, text="INSTALL FILES", font=FONT_HEAD,
-                 fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
-        tk.Label(f,
-            text=f"Files will be copied to:\n{self.game_dir}",
-            font=FONT_BODY, fg=DIM, bg=BG, justify="left",
-            wraplength=440).pack(anchor="w", padx=20, pady=(0,12))
-
-        status = self._status_label(f)
-        installed = [False]
-
-        def _do_install(btn):
-            try:
-                log(f"Installing files to: {self.game_dir}", game_dir=self.game_dir)
-                copy_src_to_dir(self.game_dir)
-                log("Files copied successfully.", game_dir=self.game_dir)
-                def _done():
-                    btn.config(state="normal", text="▶  INSTALL FILES")
-                    self._ok(status, "Files installed successfully.")
-                    installed[0] = True
-                f.after(0, _done)
-            except Exception as e:
-                log_exception("Install failed", e, self.game_dir)
-                def _fail():
-                    btn.config(state="normal", text="▶  INSTALL FILES")
-                    self._err(status, "Install failed. Check debug log.")
-                f.after(0, _fail)
-
-        def install():
-            install_btn.config(state="disabled", text="Copying files...")
-            self._warn(status, "Copying files, please wait...")
-            t = threading.Thread(target=_do_install, args=(install_btn,), daemon=True)
-            t.start()
-
-        btn_row = tk.Frame(f, bg=BG)
-        btn_row.pack(anchor="w", padx=20, pady=(8,0))
-        install_btn = self._btn(btn_row, "▶  INSTALL FILES", install, large=True)
-        install_btn.pack()
-
-        self._divider(f)
-
-        nav = tk.Frame(f, bg=BG)
-        nav.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(nav, "◀  BACK", lambda: self._show_step(2), bg=DIM2, fg=DIM).pack(side="left")
-
-        def next_step():
-            # Use the in-memory flag — avoid blocking os.path.exists under Wine
-            if not installed[0]:
-                self._warn(status, "Please install files before continuing.")
-                return
-            self._show_step(4)
-
-        self._btn(nav, "NEXT  ▶", next_step).pack(side="right")
-        return f
-
-    # ── Step 4: IP ────────────────────────────────────────────────────────────
-    def _build_step4_ip(self):
-        f = self._make_frame()
-        self._setup_header(f, 4, 6)
-
-        tk.Label(f, text="SERVER ADDRESS", font=FONT_HEAD,
-                 fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
-        tk.Label(f,
-            text="Set the ServerAddr for LAN play. Select a detected network\ninterface (VPN/LAN) or enter an IP manually.",
-            font=FONT_BODY, fg=DIM, bg=BG, justify="left").pack(anchor="w", padx=20, pady=(0,12))
-
-        # Network detection
-        self._section_label(f, "DETECTED INTERFACES")
-        net_panel = self._hud_panel(f)
-
-        net_var = tk.StringVar(value="Scanning...")
-        net_map = {}
-
-        net_row = tk.Frame(net_panel, bg=PANEL)
-        net_row.pack(fill="x", padx=8, pady=8)
-
-        net_dropdown = ttk.Combobox(net_row, textvariable=net_var,
-                                    font=FONT_BODY, state="readonly", width=40)
-        net_dropdown.pack(side="left", fill="x", expand=True)
-
-        def use_detected():
-            sel = net_var.get()
-            if sel in net_map:
-                ip_var.set(net_map[sel])
-                self._ok(ip_status, f"IP set from interface.")
-
-        self._btn(net_row, "USE", use_detected, small=True if False else False
-                  ).pack(side="left", padx=(8,0))
-
-        # Manual IP
-        self._section_label(f, "MANUAL ENTRY")
-        ip_panel = self._hud_panel(f)
-
-        ip_row = tk.Frame(ip_panel, bg=PANEL)
-        ip_row.pack(fill="x", padx=8, pady=8)
-
-        tk.Label(ip_row, text="ServerAddr :", font=FONT_BODY,
-                 fg=DIM, bg=PANEL).pack(side="left")
-
-        ip_var = tk.StringVar(value="")
-        ip_entry = tk.Entry(ip_row, textvariable=ip_var,
-                            font=FONT_MONO, bg=BG2, fg=ORANGE,
-                            insertbackground=ORANGE, relief="flat",
-                            width=20, bd=0,
-                            highlightthickness=1,
-                            highlightbackground=ORANGE2,
-                            highlightcolor=ORANGE)
-        ip_entry.pack(side="left", padx=(8,0), ipady=5, ipadx=4)
-        add_context_menu(ip_entry)
-
-        ip_status = self._status_label(f)
-
-        def _load_ip():
-            try:
-                ip = read_server_addr(self.game_dir) if self.game_dir else ""
-                f.after(0, lambda: ip_var.set(ip))
-            except:
-                pass
-        threading.Thread(target=_load_ip, daemon=True).start()
-
-        def save_ip():
-            ip = ip_var.get().strip()
-            if not ip:
-                self._warn(ip_status, "Enter an IP address.")
-                return
-            def _do():
-                try:
-                    write_server_addr(self.game_dir, ip)
-                    log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
-                    f.after(0, lambda: self._ok(ip_status, f"Saved  ServerAddr = {ip}"))
-                except Exception as e:
-                    log_exception("Save IP failed", e, self.game_dir)
-                    f.after(0, lambda: self._err(ip_status, "Save failed. Check debug log."))
-            threading.Thread(target=_do, daemon=True).start()
-
-        save_row = tk.Frame(f, bg=BG)
-        save_row.pack(anchor="w", padx=20, pady=(6,0))
-        self._btn(save_row, "💾  SAVE IP", save_ip).pack(side="left")
-
-        self._divider(f)
-
-        nav = tk.Frame(f, bg=BG)
-        nav.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(nav, "◀  BACK", lambda: self._show_step(3), bg=DIM2, fg=DIM).pack(side="left")
-        self._btn(nav, "NEXT  ▶", lambda: self._show_step(5)).pack(side="right")
-
-        populate_nets_async(f, net_var, net_map, net_dropdown)
-        return f
-
-    # ── Step 5: Shortcuts ─────────────────────────────────────────────────────
-    def _build_step5_shortcuts(self):
-        f = self._make_frame()
-        self._setup_header(f, 5, 6)
-
-        tk.Label(f, text="CREATE SHORTCUTS", font=FONT_HEAD,
-                 fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
-        tk.Label(f,
-            text="Optionally create shortcuts for quick access.\nThe launcher stays wherever you saved it — nothing gets moved.",
-            font=FONT_BODY, fg=DIM, bg=BG, justify="left").pack(anchor="w", padx=20, pady=(0,12))
-
-        # Where to place shortcuts
-        desktop_var   = tk.BooleanVar(value=True)
-        startmenu_var = tk.BooleanVar(value=False)
-
-        self._section_label(f, "SHORTCUT LOCATION")
-        loc_panel = self._hud_panel(f, pady=(2,8))
-        for text, var in [("Desktop", desktop_var),
-                          ("Start Menu / App Launcher", startmenu_var)]:
-            row = tk.Frame(loc_panel, bg=PANEL)
-            row.pack(fill="x", padx=12, pady=3)
-            tk.Checkbutton(row, text=text, variable=var,
-                           font=FONT_BODY, fg=WHITE, bg=PANEL,
-                           selectcolor=BG2, activebackground=PANEL,
-                           activeforeground=ORANGE,
-                           relief="flat").pack(side="left")
-
-        # What to create shortcuts for
-        launcher_shortcut_var = tk.BooleanVar(value=True)
-        helper_shortcut_var   = tk.BooleanVar(value=True)
-
-        self._section_label(f, "CREATE SHORTCUT FOR")
-        what_panel = self._hud_panel(f, pady=(2,8))
-        for text, var in [("SCC LAN Launcher  (this app)", launcher_shortcut_var),
-                          ("SCC LAN Helper  (game helper exe)", helper_shortcut_var)]:
-            row = tk.Frame(what_panel, bg=PANEL)
-            row.pack(fill="x", padx=12, pady=3)
-            tk.Checkbutton(row, text=text, variable=var,
-                           font=FONT_BODY, fg=WHITE, bg=PANEL,
-                           selectcolor=BG2, activebackground=PANEL,
-                           activeforeground=ORANGE,
-                           relief="flat").pack(side="left")
-
-        status = self._status_label(f)
-
-        self._divider(f)
-
-        nav = tk.Frame(f, bg=BG)
-        nav.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(nav, "◀  BACK", lambda: self._show_step(4), bg=DIM2, fg=DIM).pack(side="left")
-
-        def finish():
-            shortcut_types = []
-            if desktop_var.get():    shortcut_types.append("desktop")
-            if startmenu_var.get():  shortcut_types.append("startmenu")
-
-            if getattr(sys, "frozen", False):
-                launcher_exe = sys.executable
-            else:
-                launcher_exe = os.path.abspath(__file__)
-            helper_exe = get_exe_path(self.game_dir)
-
-            if launcher_shortcut_var.get() and shortcut_types:
-                try:
-                    create_shortcuts(launcher_exe, shortcut_types, name="SCC LAN Launcher")
-                    log(f"Launcher shortcuts created: {shortcut_types}", game_dir=self.game_dir)
-                except Exception as e:
-                    log_exception("Launcher shortcut failed", e, self.game_dir)
-
-            if helper_shortcut_var.get() and shortcut_types:
-                try:
-                    create_shortcuts(helper_exe, shortcut_types, name="SCC LAN Helper")
-                    log(f"Helper shortcuts created: {shortcut_types}", game_dir=self.game_dir)
-                except Exception as e:
-                    log_exception("Helper shortcut failed", e, self.game_dir)
-
-            self.setup_done = True
-            self._save()
-            self._show_main()
-
-        self._btn(nav, "✔  FINISH", finish, large=True).pack(side="right")
-        return f
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # MAIN SCREEN
-    # ══════════════════════════════════════════════════════════════════════════
-
-    def _show_main(self):
-        self._transition(self._build_main)
-
-    def _build_main(self):
-        f = self._make_frame()
-        self._main_header(f)
-
-        # ── Title strip ───────────────────────────────────────────────────────
-        title_row = tk.Frame(f, bg=BG)
-        title_row.pack(fill="x", padx=20, pady=(16,0))
-        tk.Label(title_row, text="SCC  LAN  LAUNCHER",
-                 font=("Courier New", 18, "bold"), fg=ORANGE, bg=BG).pack(side="left")
-        tk.Label(title_row, text="[ ONLINE ]",
-                 font=FONT_SMALL, fg=GREEN_HUD, bg=BG).pack(side="right", pady=(8,0))
-
-        # Game dir display
-        dir_panel = self._hud_panel(f, pady=(8,4))
-        dir_row = tk.Frame(dir_panel, bg=PANEL)
-        dir_row.pack(fill="x", padx=12, pady=6)
-        tk.Label(dir_row, text="DIR :", font=FONT_SMALL, fg=DIM, bg=PANEL).pack(side="left")
-        tk.Label(dir_row, text=self.game_dir, font=FONT_BODY,
-                 fg=WHITE, bg=PANEL, wraplength=360, anchor="w").pack(side="left", padx=(6,0))
-
-        self._divider(f)
-
-        # ── IP Section ────────────────────────────────────────────────────────
-        self._section_label(f, "SERVER ADDRESS")
-
-        ip_panel = self._hud_panel(f, pady=(2,4))
-        ip_top = tk.Frame(ip_panel, bg=PANEL)
-        ip_top.pack(fill="x", padx=8, pady=(8,4))
-
-        # Network dropdown
-        tk.Label(ip_top, text="INTERFACE :", font=FONT_SMALL, fg=DIM, bg=PANEL).pack(side="left")
-        net_var = tk.StringVar(value="Scanning...")
-        net_map = {}
-        net_dd = ttk.Combobox(ip_top, textvariable=net_var, font=FONT_BODY,
-                               state="readonly", width=34)
-        net_dd.pack(side="left", padx=(6,6))
-
-        ip_bot = tk.Frame(ip_panel, bg=PANEL)
-        ip_bot.pack(fill="x", padx=8, pady=(0,8))
-
-        tk.Label(ip_bot, text="ServerAddr :", font=FONT_BODY, fg=DIM, bg=PANEL).pack(side="left")
-        ip_var = tk.StringVar(value="")
-        ip_entry = tk.Entry(ip_bot, textvariable=ip_var,
-                            font=FONT_MONO, bg=BG2, fg=ORANGE,
-                            insertbackground=ORANGE, relief="flat", width=20, bd=0,
-                            highlightthickness=1,
-                            highlightbackground=ORANGE2, highlightcolor=ORANGE)
-        ip_entry.pack(side="left", padx=(8,8), ipady=5, ipadx=4)
-        add_context_menu(ip_entry)
-
-        ip_status = self._status_label(f)
-
-        def _load_ip_main():
-            try:
-                ip = read_server_addr(self.game_dir) if self._gd() else ""
-                f.after(0, lambda: ip_var.set(ip))
-            except:
-                pass
-        threading.Thread(target=_load_ip_main, daemon=True).start()
-
-        def use_net():
-            sel = net_var.get()
-            if sel in net_map:
-                ip_var.set(net_map[sel])
-                self._ok(ip_status, "IP set from interface.")
-
-        use_net_btn = self._btn(ip_top, "USE", use_net)
-        use_net_btn.pack(side="left")
-
-        def save_ip():
-            ip = ip_var.get().strip()
-            if not ip:
-                self._warn(ip_status, "Enter an IP address.")
-                return
-            def _do():
-                try:
-                    write_server_addr(self.game_dir, ip)
-                    log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
-                    f.after(0, lambda: self._ok(ip_status, f"Saved  ServerAddr = {ip}"))
-                except Exception as e:
-                    log_exception("Save IP failed", e, self.game_dir)
-                    f.after(0, lambda: self._err(ip_status, "Save failed."))
-            threading.Thread(target=_do, daemon=True).start()
-
-        self._btn(ip_bot, "💾  SAVE", save_ip).pack(side="left")
-
-        self._divider(f)
-
-        # ── Action buttons ────────────────────────────────────────────────────
-        self._section_label(f, "ACTIONS")
-
-        launch_status = self._status_label(f)
-        install_status = self._status_label(f)
-        dlc_status = self._status_label(f)
-
-        def launch():
-            exe = get_exe_path(self.game_dir)
-            if not os.path.exists(exe):
-                self._err(launch_status, "EXE not found. Reinstall files first.")
-                return
-            try:
-                log(f"Launching: {exe}", game_dir=self.game_dir)
-                subprocess.Popen([exe], cwd=os.path.dirname(exe))
-                self._ok(launch_status, "Launched successfully.")
-            except Exception as e:
-                log_exception("Launch failed", e, self.game_dir)
-                self._err(launch_status, "Launch failed. Check debug log.")
-
-        def reinstall():
-            def _do():
-                try:
-                    log(f"Reinstalling files to: {self.game_dir}", game_dir=self.game_dir)
-                    copy_src_to_dir(self.game_dir)
-                    log("Files reinstalled.", game_dir=self.game_dir)
-                    f.after(0, lambda: self._ok(install_status, "Files reinstalled."))
-                except Exception as e:
-                    log_exception("Reinstall failed", e, self.game_dir)
-                    f.after(0, lambda: self._err(install_status, "Reinstall failed."))
-            self._warn(install_status, "Copying files, please wait...")
-            threading.Thread(target=_do, daemon=True).start()
-
-        def install_dlc():
-            dlc = filedialog.askdirectory(title="Select Extracted Insurgency Pack DLC Folder")
-            if not dlc:
-                return
-            self._warn(dlc_status, "Copying DLC files, please wait...")
-            def _do():
-                try:
-                    log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
-                    copy_dlc_to_dir(dlc, self.game_dir)
-                    log("DLC installed.", game_dir=self.game_dir)
-                    f.after(0, lambda: self._ok(dlc_status, "Insurgency Pack DLC installed."))
-                except Exception as e:
-                    log_exception("DLC install failed", e, self.game_dir)
-                    f.after(0, lambda: self._err(dlc_status, "DLC install failed."))
-            threading.Thread(target=_do, daemon=True).start()
-
-        # Launch row
-        row1 = tk.Frame(f, bg=BG)
-        row1.pack(fill="x", padx=20, pady=(4,2))
-        self._btn(row1, "⬛  LAUNCH SCC LAN HELPER", launch,
-                  bg="#1a2a1a", fg=GREEN_HUD, large=True).pack(fill="x")
-
-        # Install + DLC row
-        row2 = tk.Frame(f, bg=BG)
-        row2.pack(fill="x", padx=20, pady=(4,2))
-        self._btn(row2, "▶  REINSTALL FILES", reinstall).pack(side="left", fill="x", expand=True)
-        tk.Frame(row2, bg=BG, width=8).pack(side="left")
-        self._btn(row2, "📦  INSTALL DLC", install_dlc,
-                  bg="#1a222a", fg="#6fa8cf").pack(side="left", fill="x", expand=True)
-
-        self._divider(f)
-
-        # ── Settings row ──────────────────────────────────────────────────────
-        self._section_label(f, "SETTINGS")
-
-        def reconfigure():
-            confirm = messagebox.askyesno("Reconfigure",
-                "Change the game directory?\nThis will restart the setup wizard.")
-            if not confirm:
-                return
-            also_reset = messagebox.askyesno("Reset Installation?",
-                "Also clear saved IP and mark files as not installed?\n(Files already copied will remain on disk.)")
-            log("User triggered reconfigure.", game_dir=self.game_dir)
-            self.setup_done = False
-            if also_reset:
-                self.game_dir = ""
-            self._save()
-            self._show_step(0 if also_reset else 1)
-
-        def reset_all():
-            confirm = messagebox.askyesno("Reset Settings",
-                "This will clear your saved IP and game directory.\nYou will be returned to the setup wizard.\n\nContinue?")
-            if not confirm:
-                return
-            also_dir = messagebox.askyesno("Reset Game Directory?",
-                "Also clear the game directory path?\n(Files already copied will NOT be deleted.)")
-            log("User triggered full reset.", game_dir=self.game_dir)
-            self.setup_done = False
-            if also_dir:
-                self.game_dir = ""
-            self._save()
-            self._show_step(0)
-
-        set_row = tk.Frame(f, bg=BG)
-        set_row.pack(fill="x", padx=20, pady=(4,2))
-        self._btn(set_row, "⟳  RECONFIGURE PATH", reconfigure,
-                  bg=DIM2, fg=DIM).pack(side="left")
-        tk.Frame(set_row, bg=BG, width=8).pack(side="left")
-        self._btn(set_row, "↺  RESET SETTINGS", reset_all,
-                  bg=RED_HUD+"22", fg=RED_HUD).pack(side="left")
-
-        self._divider(f)
-
-        # ── Debug log ─────────────────────────────────────────────────────────
-        self._section_label(f, "DEBUG LOG")
-        log_path = get_log_file(self.game_dir)
-        tk.Label(f, text=f"Log: {log_path}", font=FONT_SMALL,
-                 fg=DIM, bg=BG, wraplength=460).pack(anchor="w", padx=20, pady=(0,4))
-
-        log_status = self._status_label(f)
-
-        def copy_log():
-            if not os.path.exists(log_path):
-                self._warn(log_status, "No log file found yet.")
-                return
-            try:
-                with open(log_path, "r", encoding="utf-8") as lf:
-                    contents = lf.read()
-                self.clipboard_clear()
-                self.clipboard_append(contents)
-                self._ok(log_status, "Log copied to clipboard.")
-            except Exception as e:
-                self._err(log_status, "Could not read log.")
-
-        def clear_log():
-            if not os.path.exists(log_path):
-                self._warn(log_status, "No log file to clear.")
-                return
-            if messagebox.askyesno("Clear Log", "Delete the debug log?\n\nThis cannot be undone."):
-                try:
-                    os.remove(log_path)
-                    self._ok(log_status, "Log cleared.")
-                except Exception as e:
-                    self._err(log_status, "Could not clear log.")
-
-        log_row = tk.Frame(f, bg=BG)
-        log_row.pack(fill="x", padx=20, pady=(0,20))
-        self._btn(log_row, "📋  COPY LOG", copy_log).pack(side="left")
-        tk.Frame(log_row, bg=BG, width=8).pack(side="left")
-        self._btn(log_row, "🗑  CLEAR LOG", clear_log,
-                  bg=RED_HUD+"22", fg=RED_HUD).pack(side="left")
-
-        populate_nets_async(f, net_var, net_map, net_dd)
-        return f
+        return {"ok": True}
+
+    def reset_settings(self, clear_dir):
+        log("User triggered reset.", game_dir=self.game_dir)
+        self.setup_done = False
+        if clear_dir:
+            self.game_dir = ""
+            self.settings["game_dir"] = ""
+        self.settings["setup_done"] = False
+        save_settings(self.settings)
+        return {"ok": True}
+
+    def get_log(self):
+        log_path = get_log_file(self.game_dir or None)
+        try:
+            if os.path.exists(log_path):
+                with open(log_path, "r", encoding="utf-8") as f:
+                    return {"ok": True, "path": log_path, "content": f.read()}
+        except: pass
+        return {"ok": True, "path": log_path, "content": ""}
+
+    def clear_log(self):
+        log_path = get_log_file(self.game_dir or None)
+        try:
+            if os.path.exists(log_path):
+                os.remove(log_path)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+# ── HTML UI ───────────────────────────────────────────────────────────────────
+HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>SCC LAN Launcher</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Share+Tech+Mono&display=swap');
+
+  :root {
+    --bg: #060608;
+    --bg2: #0a0a0f;
+    --panel: #0d0d12;
+    --border: #1a1a24;
+    --orange: #E8722A;
+    --orange2: #a04d18;
+    --orange3: #3a1a08;
+    --orange-glow: rgba(232,114,42,0.15);
+    --white: #F0EEE8;
+    --dim: #3a3a40;
+    --dim2: #1a1a20;
+    --green: #4aff91;
+    --green-glow: rgba(74,255,145,0.15);
+    --red: #ff4a4a;
+    --blue: #4a9fff;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--white);
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    user-select: none;
+  }
+
+  /* ── scanlines overlay ── */
+  body::before {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── noise overlay ── */
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    opacity: 0.025;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 9998;
+  }
+
+  /* ── header ── */
+  .header {
+    background: var(--bg2);
+    border-bottom: 2px solid var(--orange);
+    padding: 10px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+    position: relative;
+  }
+  .header::after {
+    content: '';
+    position: absolute;
+    bottom: -6px; left: 0; right: 0;
+    height: 4px;
+    background: linear-gradient(90deg, transparent, var(--orange-glow), transparent);
+  }
+  .header-left { display: flex; align-items: baseline; gap: 8px; }
+  .header-tom { font-size: 10px; color: var(--dim); letter-spacing: 3px; }
+  .header-title { font-family: 'Bebas Neue', sans-serif; font-size: 16px; color: var(--orange); letter-spacing: 4px; }
+  .header-right { font-size: 10px; color: var(--dim); letter-spacing: 2px; }
+
+  /* ── main content ── */
+  #app {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 0;
+    scrollbar-width: thin;
+    scrollbar-color: var(--orange2) var(--bg2);
+  }
+  #app::-webkit-scrollbar { width: 4px; }
+  #app::-webkit-scrollbar-track { background: var(--bg2); }
+  #app::-webkit-scrollbar-thumb { background: var(--orange2); }
+
+  /* ── screens ── */
+  .screen { display: none; padding: 20px; animation: fadeIn 0.3s ease; }
+  .screen.active { display: block; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+  /* ── progress dots ── */
+  .progress { display: flex; gap: 8px; justify-content: center; margin: 16px 0 24px; }
+  .dot { width: 8px; height: 8px; border: 1px solid var(--dim); transform: rotate(45deg); transition: all 0.3s; }
+  .dot.done { background: var(--orange); border-color: var(--orange); box-shadow: 0 0 8px var(--orange); }
+  .dot.active { border-color: var(--orange); box-shadow: 0 0 4px var(--orange); }
+
+  /* ── welcome screen ── */
+  .eye-container { text-align: center; margin: 10px 0 20px; position: relative; }
+  .eye-svg { width: 100%; max-width: 340px; }
+  .welcome-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: clamp(32px, 6vw, 52px);
+    color: var(--orange);
+    letter-spacing: 8px;
+    text-align: center;
+    text-shadow: 0 0 30px rgba(232,114,42,0.5), 0 0 60px rgba(232,114,42,0.2);
+    margin: 0 0 6px;
+  }
+  .welcome-sub {
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 4px;
+    text-align: center;
+    margin-bottom: 20px;
+  }
+  .ghost-text {
+    font-size: 9px;
+    color: var(--orange2);
+    letter-spacing: 4px;
+    text-align: center;
+    margin-bottom: 4px;
+    opacity: 0.6;
+  }
+  .welcome-desc {
+    text-align: center;
+    font-size: 11px;
+    color: var(--dim);
+    line-height: 1.8;
+    margin: 16px 0 24px;
+    letter-spacing: 1px;
+  }
+
+  /* ── section label ── */
+  .section-label {
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: 4px;
+    margin: 16px 0 6px;
+    padding-left: 2px;
+  }
+
+  /* ── hud panel ── */
+  .hud-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    position: relative;
+    padding: 12px 16px;
+    margin-bottom: 8px;
+  }
+  .hud-panel::before, .hud-panel::after,
+  .hud-panel .corner-br, .hud-panel .corner-tl {
+    content: '';
+    position: absolute;
+    width: 10px; height: 10px;
+    border-color: var(--orange2);
+    border-style: solid;
+  }
+  .hud-panel::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; }
+  .hud-panel::after  { top: -1px; right: -1px; border-width: 2px 2px 0 0; }
+  .hud-panel .corner-bl { position: absolute; bottom: -1px; left: -1px; width: 10px; height: 10px; border: solid var(--orange2); border-width: 0 0 2px 2px; }
+  .hud-panel .corner-br { position: absolute; bottom: -1px; right: -1px; width: 10px; height: 10px; border: solid var(--orange2); border-width: 0 2px 2px 0; }
+
+  /* ── path display ── */
+  .path-display {
+    font-size: 10px;
+    color: var(--white);
+    word-break: break-all;
+    line-height: 1.6;
+    min-height: 20px;
+  }
+  .path-display.empty { color: var(--dim); font-style: italic; }
+
+  /* ── inputs ── */
+  .input-row { display: flex; align-items: center; gap: 10px; }
+  .input-label { font-size: 10px; color: var(--dim); letter-spacing: 2px; white-space: nowrap; }
+  input[type="text"] {
+    flex: 1;
+    background: var(--bg2);
+    border: 1px solid var(--orange2);
+    color: var(--orange);
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 18px;
+    letter-spacing: 2px;
+    padding: 6px 10px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+  }
+  input[type="text"]:focus {
+    border-color: var(--orange);
+    box-shadow: 0 0 12px var(--orange-glow);
+  }
+  select {
+    flex: 1;
+    background: var(--bg2);
+    border: 1px solid var(--orange2);
+    color: var(--white);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    padding: 6px 10px;
+    outline: none;
+    cursor: pointer;
+  }
+  select:focus { border-color: var(--orange); }
+
+  /* ── checkboxes ── */
+  .check-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; cursor: pointer; }
+  .check-row input[type="checkbox"] { display: none; }
+  .check-box {
+    width: 14px; height: 14px;
+    border: 1px solid var(--dim);
+    transform: rotate(45deg);
+    flex-shrink: 0;
+    transition: all 0.2s;
+    position: relative;
+  }
+  .check-row input:checked + .check-box {
+    background: var(--orange);
+    border-color: var(--orange);
+    box-shadow: 0 0 8px var(--orange-glow);
+  }
+  .check-label { font-size: 11px; color: var(--white); letter-spacing: 1px; }
+
+  /* ── buttons ── */
+  .btn {
+    background: var(--orange3);
+    border: 1px solid var(--orange2);
+    color: var(--orange);
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 2px;
+    padding: 8px 18px;
+    cursor: pointer;
+    transition: all 0.15s;
+    position: relative;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  .btn::before {
+    content: '';
+    position: absolute;
+    top: 0; left: -100%;
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(232,114,42,0.1), transparent);
+    transition: left 0.4s;
+  }
+  .btn:hover::before { left: 100%; }
+  .btn:hover {
+    background: var(--orange2);
+    border-color: var(--orange);
+    color: var(--white);
+    box-shadow: 0 0 16px var(--orange-glow);
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+  .btn:disabled:hover { background: var(--orange3); border-color: var(--orange2); color: var(--orange); box-shadow: none; }
+
+  .btn-large {
+    font-size: 13px;
+    padding: 12px 24px;
+    letter-spacing: 3px;
+    width: 100%;
+  }
+  .btn-green {
+    background: var(--green-glow);
+    border-color: var(--green);
+    color: var(--green);
+  }
+  .btn-green:hover { background: rgba(74,255,145,0.2); box-shadow: 0 0 16px var(--green-glow); }
+  .btn-red {
+    background: rgba(255,74,74,0.08);
+    border-color: rgba(255,74,74,0.4);
+    color: var(--red);
+  }
+  .btn-red:hover { background: rgba(255,74,74,0.15); box-shadow: 0 0 12px rgba(255,74,74,0.2); }
+  .btn-blue {
+    background: rgba(74,159,255,0.08);
+    border-color: rgba(74,159,255,0.4);
+    color: var(--blue);
+  }
+  .btn-blue:hover { background: rgba(74,159,255,0.15); }
+  .btn-dim {
+    background: transparent;
+    border-color: var(--dim2);
+    color: var(--dim);
+  }
+  .btn-dim:hover { border-color: var(--dim); color: var(--white); box-shadow: none; background: var(--dim2); }
+
+  /* ── nav row ── */
+  .nav-row { display: flex; justify-content: space-between; align-items: center; margin-top: 20px; gap: 8px; }
+  .nav-row .right { display: flex; gap: 8px; }
+
+  /* ── status ── */
+  .status {
+    font-size: 10px;
+    letter-spacing: 1px;
+    margin-top: 8px;
+    min-height: 16px;
+    transition: all 0.3s;
+  }
+  .status.ok { color: var(--green); }
+  .status.err { color: var(--red); }
+  .status.warn { color: var(--orange); }
+
+  /* ── divider ── */
+  .divider {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 20px 0;
+    position: relative;
+  }
+  .divider::after {
+    content: '◆';
+    position: absolute;
+    left: 50%;
+    top: -7px;
+    transform: translateX(-50%);
+    font-size: 8px;
+    color: var(--orange2);
+    background: var(--bg);
+    padding: 0 6px;
+  }
+
+  /* ── screen title ── */
+  .screen-title {
+    font-family: 'Bebas Neue', sans-serif;
+    font-size: 22px;
+    color: var(--orange);
+    letter-spacing: 6px;
+    margin-bottom: 4px;
+  }
+  .screen-desc {
+    font-size: 10px;
+    color: var(--dim);
+    letter-spacing: 1px;
+    line-height: 1.7;
+    margin-bottom: 16px;
+  }
+
+  /* ── main screen layout ── */
+  .main-grid { display: flex; flex-direction: column; gap: 4px; }
+  .main-section { padding: 4px 0; }
+
+  /* ── log viewer ── */
+  .log-content {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    padding: 10px;
+    font-size: 9px;
+    color: var(--dim);
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.6;
+    scrollbar-width: thin;
+    scrollbar-color: var(--orange2) var(--bg2);
+  }
+
+  /* ── loading spinner ── */
+  .spinner {
+    display: inline-block;
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    0%  { content: '◆'; }
+    25% { content: '◇'; }
+    50% { content: '◆'; }
+    75% { content: '◇'; }
+  }
+
+  /* ── pulse animation for online indicator ── */
+  .pulse {
+    display: inline-block;
+    width: 6px; height: 6px;
+    background: var(--green);
+    border-radius: 50%;
+    box-shadow: 0 0 6px var(--green);
+    animation: pulse 2s ease-in-out infinite;
+    margin-right: 6px;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 6px var(--green); }
+    50% { opacity: 0.4; box-shadow: 0 0 2px var(--green); }
+  }
+
+  /* ── boot animation ── */
+  .boot-screen {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg);
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    z-index: 9000;
+    transition: opacity 0.5s;
+  }
+  .boot-screen.fade-out { opacity: 0; pointer-events: none; }
+  .boot-line {
+    font-size: 10px; color: var(--orange2);
+    letter-spacing: 2px; margin: 3px 0;
+    opacity: 0;
+    animation: bootLine 0.1s forwards;
+  }
+  @keyframes bootLine { to { opacity: 1; } }
+
+  /* ── flicker animation ── */
+  @keyframes flicker {
+    0%, 100% { opacity: 1; }
+    92% { opacity: 1; }
+    93% { opacity: 0.4; }
+    94% { opacity: 1; }
+    96% { opacity: 0.6; }
+    97% { opacity: 1; }
+  }
+  .flicker { animation: flicker 4s infinite; }
+
+  /* ── eye animation ── */
+  @keyframes eyePulse {
+    0%, 100% { transform: scale(1); opacity: 0.8; }
+    50% { transform: scale(1.05); opacity: 1; }
+  }
+  .eye-pulse { animation: eyePulse 3s ease-in-out infinite; }
+
+  /* ── btn row ── */
+  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+
+  /* ── warning box ── */
+  .warn-box {
+    background: rgba(232,114,42,0.05);
+    border: 1px solid var(--orange2);
+    padding: 8px 12px;
+    font-size: 10px;
+    color: var(--orange);
+    letter-spacing: 1px;
+    margin-bottom: 12px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Boot screen -->
+<div class="boot-screen" id="bootScreen">
+  <div style="text-align:center">
+    <svg width="80" height="50" viewBox="0 0 160 100">
+      <ellipse cx="80" cy="50" rx="70" ry="28" fill="none" stroke="#E8722A" stroke-width="1.5" opacity="0.6"/>
+      <circle cx="80" cy="50" r="16" fill="#E8722A" opacity="0.9" class="eye-pulse"/>
+      <circle cx="80" cy="50" r="6" fill="#060608"/>
+    </svg>
+    <div id="bootLines" style="margin-top:16px"></div>
+  </div>
+</div>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-left">
+    <span class="header-tom">TOM CLANCY'S</span>
+    <span class="header-title">SPLINTER CELL: CONVICTION</span>
+  </div>
+  <div class="header-right" id="headerRight">LAN LAUNCHER</div>
+</div>
+
+<!-- App -->
+<div id="app">
+
+  <!-- ── SCREEN 0: WELCOME ── -->
+  <div class="screen active" id="screen-0">
+    <div class="progress" id="progress-0">
+      <div class="dot active"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+      <div class="dot"></div>
+    </div>
+
+    <div class="eye-container">
+      <svg class="eye-svg flicker" viewBox="0 0 400 160" xmlns="http://www.w3.org/2000/svg">
+        <!-- bracket corners -->
+        <polyline points="0,30 0,0 30,0" fill="none" stroke="#a04d18" stroke-width="1"/>
+        <polyline points="370,0 400,0 400,30" fill="none" stroke="#a04d18" stroke-width="1"/>
+        <polyline points="0,130 0,160 30,160" fill="none" stroke="#a04d18" stroke-width="1"/>
+        <polyline points="370,160 400,160 400,130" fill="none" stroke="#a04d18" stroke-width="1"/>
+        <!-- eye outer -->
+        <ellipse cx="200" cy="80" rx="120" ry="48" fill="none" stroke="#E8722A" stroke-width="1.5" opacity="0.7"/>
+        <!-- eye inner glow -->
+        <ellipse cx="200" cy="80" rx="100" ry="38" fill="none" stroke="#E8722A" stroke-width="0.5" opacity="0.3"/>
+        <!-- iris -->
+        <circle cx="200" cy="80" r="28" fill="none" stroke="#E8722A" stroke-width="1.5" opacity="0.9"/>
+        <circle cx="200" cy="80" r="28" fill="rgba(232,114,42,0.08)"/>
+        <!-- pupil -->
+        <circle cx="200" cy="80" r="10" fill="#E8722A" opacity="0.95" class="eye-pulse"/>
+        <circle cx="200" cy="80" r="4" fill="#060608"/>
+        <!-- scan lines on eye -->
+        <line x1="80" y1="80" x2="172" y2="80" stroke="#a04d18" stroke-width="0.5" opacity="0.5"/>
+        <line x1="228" y1="80" x2="320" y2="80" stroke="#a04d18" stroke-width="0.5" opacity="0.5"/>
+        <!-- target reticle -->
+        <circle cx="200" cy="80" r="44" fill="none" stroke="#3a1a08" stroke-width="1" stroke-dasharray="4,8"/>
+      </svg>
+    </div>
+
+    <div class="ghost-text">[ LAST KNOWN POSITION ]</div>
+    <div class="welcome-title flicker" id="welcomeTitle">SCC LAN LAUNCHER</div>
+    <div class="welcome-sub" id="welcomeSub">FOURTH ECHELON  ·  NETWORK CONFIGURATION SYSTEM</div>
+
+    <hr class="divider">
+
+    <div class="welcome-desc">
+      This utility configures your LAN connection<br>
+      for Splinter Cell: Conviction FusionFix.<br><br>
+      Complete each step to initialize the system.
+    </div>
+
+    <button class="btn btn-large" onclick="goToStep(1)">▶  INITIALIZE SETUP</button>
+  </div>
+
+  <!-- ── SCREEN 1: DIRECTORY ── -->
+  <div class="screen" id="screen-1">
+    <div class="progress" id="progress-1"></div>
+    <div class="screen-title">GAME DIRECTORY</div>
+    <div class="screen-desc">
+      Select the root folder of your Splinter Cell: Conviction installation.<br>
+      Do NOT select the src/ subfolder — select the main game folder.
+    </div>
+
+    <div class="section-label">CURRENT PATH</div>
+    <div class="hud-panel">
+      <div class="corner-bl"></div><div class="corner-br"></div>
+      <div class="path-display empty" id="dirDisplay">No directory selected</div>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="browseDir()">📁  BROWSE</button>
+    </div>
+    <div class="status" id="dirStatus"></div>
+
+    <hr class="divider">
+    <div class="nav-row">
+      <button class="btn btn-dim" onclick="goToStep(0)">◀  BACK</button>
+      <button class="btn" onclick="nextFromDir()">NEXT  ▶</button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 2: DLC ── -->
+  <div class="screen" id="screen-2">
+    <div class="progress" id="progress-2"></div>
+    <div class="screen-title">OPTIONAL DLC</div>
+    <div class="screen-desc">
+      Install the Insurgency Pack DLC before copying main files.<br>
+      Extract the DLC .zip first, then select the extracted folder.<br>
+      You can skip this and install DLC later from the main screen.
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-blue" id="dlcBtn2" onclick="installDLC2()">📦  INSTALL INSURGENCY PACK DLC</button>
+    </div>
+    <div class="status" id="dlcStatus2"></div>
+
+    <hr class="divider">
+    <div class="nav-row">
+      <button class="btn btn-dim" onclick="goToStep(1)">◀  BACK</button>
+      <div class="right">
+        <button class="btn btn-dim" onclick="goToStep(3)">SKIP  ▶</button>
+        <button class="btn" onclick="goToStep(3)">NEXT  ▶</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 3: INSTALL ── -->
+  <div class="screen" id="screen-3">
+    <div class="progress" id="progress-3"></div>
+    <div class="screen-title">INSTALL FILES</div>
+    <div class="screen-desc" id="installDesc">Files will be copied to your game directory.</div>
+
+    <div class="btn-row">
+      <button class="btn btn-large" id="installBtn" onclick="installFiles()">▶  INSTALL FILES</button>
+    </div>
+    <div class="status" id="installStatus"></div>
+
+    <hr class="divider">
+    <div class="nav-row">
+      <button class="btn btn-dim" onclick="goToStep(2)">◀  BACK</button>
+      <button class="btn" id="installNextBtn" onclick="nextFromInstall()" disabled>NEXT  ▶</button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 4: IP ── -->
+  <div class="screen" id="screen-4">
+    <div class="progress" id="progress-4"></div>
+    <div class="screen-title">SERVER ADDRESS</div>
+    <div class="screen-desc">
+      Set the ServerAddr for LAN play. Select a detected network interface or enter manually.
+    </div>
+
+    <div class="section-label">DETECTED INTERFACES</div>
+    <div class="hud-panel">
+      <div class="corner-bl"></div><div class="corner-br"></div>
+      <div class="input-row">
+        <select id="netSelect4"><option>Scanning...</option></select>
+        <button class="btn" onclick="useDetectedIP(4)">USE</button>
+      </div>
+    </div>
+
+    <div class="section-label">MANUAL ENTRY</div>
+    <div class="hud-panel">
+      <div class="corner-bl"></div><div class="corner-br"></div>
+      <div class="input-row">
+        <span class="input-label">ServerAddr :</span>
+        <input type="text" id="ipInput4" placeholder="0.0.0.0">
+      </div>
+    </div>
+    <div class="btn-row">
+      <button class="btn" onclick="saveIP(4)">💾  SAVE IP</button>
+    </div>
+    <div class="status" id="ipStatus4"></div>
+
+    <hr class="divider">
+    <div class="nav-row">
+      <button class="btn btn-dim" onclick="goToStep(3)">◀  BACK</button>
+      <button class="btn" onclick="goToStep(5)">NEXT  ▶</button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 5: SHORTCUTS ── -->
+  <div class="screen" id="screen-5">
+    <div class="progress" id="progress-5"></div>
+    <div class="screen-title">CREATE SHORTCUTS</div>
+    <div class="screen-desc">
+      Optionally create shortcuts for quick access.<br>
+      The launcher stays wherever you saved it.
+    </div>
+
+    <div class="section-label">SHORTCUT LOCATION</div>
+    <div class="hud-panel">
+      <div class="corner-bl"></div><div class="corner-br"></div>
+      <label class="check-row">
+        <input type="checkbox" id="desktopCheck" checked>
+        <div class="check-box"></div>
+        <span class="check-label">Desktop</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="startmenuCheck">
+        <div class="check-box"></div>
+        <span class="check-label">Start Menu / App Launcher</span>
+      </label>
+    </div>
+
+    <div class="section-label">CREATE SHORTCUT FOR</div>
+    <div class="hud-panel">
+      <div class="corner-bl"></div><div class="corner-br"></div>
+      <label class="check-row">
+        <input type="checkbox" id="launcherShortcut" checked>
+        <div class="check-box"></div>
+        <span class="check-label">SCC LAN Launcher  (this app)</span>
+      </label>
+      <label class="check-row">
+        <input type="checkbox" id="helperShortcut" checked>
+        <div class="check-box"></div>
+        <span class="check-label">SCC LAN Helper  (game helper exe)</span>
+      </label>
+    </div>
+    <div class="status" id="shortcutStatus"></div>
+
+    <hr class="divider">
+    <div class="nav-row">
+      <button class="btn btn-dim" onclick="goToStep(4)">◀  BACK</button>
+      <button class="btn btn-green btn-large" style="width:auto;padding:12px 32px" onclick="finishSetup()">✔  FINISH</button>
+    </div>
+  </div>
+
+  <!-- ── SCREEN 6: MAIN ── -->
+  <div class="screen" id="screen-6">
+    <div class="main-grid">
+
+      <!-- Status bar -->
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-family:'Bebas Neue',sans-serif;font-size:20px;color:var(--orange);letter-spacing:5px">SCC LAN LAUNCHER</div>
+        <div style="font-size:9px;color:var(--green);display:flex;align-items:center"><span class="pulse"></span>SYSTEM ONLINE</div>
+      </div>
+
+      <div class="hud-panel" style="margin-bottom:12px">
+        <div class="corner-bl"></div><div class="corner-br"></div>
+        <div style="font-size:9px;color:var(--dim);letter-spacing:2px;margin-bottom:4px">GAME DIRECTORY</div>
+        <div class="path-display" id="mainDirDisplay"></div>
+      </div>
+
+      <hr class="divider">
+
+      <!-- IP Section -->
+      <div class="section-label">SERVER ADDRESS</div>
+      <div class="hud-panel">
+        <div class="corner-bl"></div><div class="corner-br"></div>
+        <div style="margin-bottom:10px">
+          <div style="font-size:9px;color:var(--dim);letter-spacing:2px;margin-bottom:6px">DETECTED INTERFACES</div>
+          <div class="input-row">
+            <select id="netSelectMain"><option>Scanning...</option></select>
+            <button class="btn" onclick="useDetectedIP('main')">USE</button>
+          </div>
+        </div>
+        <div>
+          <div style="font-size:9px;color:var(--dim);letter-spacing:2px;margin-bottom:6px">SERVER ADDR</div>
+          <div class="input-row">
+            <input type="text" id="ipInputMain" placeholder="0.0.0.0" style="font-size:22px">
+            <button class="btn" onclick="saveIP('main')">💾  SAVE</button>
+          </div>
+        </div>
+      </div>
+      <div class="status" id="ipStatusMain"></div>
+
+      <hr class="divider">
+
+      <!-- Launch -->
+      <div class="section-label">LAUNCH</div>
+      <button class="btn btn-green btn-large" onclick="launchHelper()">⬛  LAUNCH SCC LAN HELPER</button>
+      <div class="status" id="launchStatus"></div>
+
+      <hr class="divider">
+
+      <!-- Actions -->
+      <div class="section-label">ACTIONS</div>
+      <div class="btn-row">
+        <button class="btn" id="reinstallBtn" onclick="reinstallFiles()">▶  REINSTALL FILES</button>
+        <button class="btn btn-blue" id="dlcBtnMain" onclick="installDLCMain()">📦  INSTALL DLC</button>
+      </div>
+      <div class="status" id="actionStatus"></div>
+
+      <hr class="divider">
+
+      <!-- Settings -->
+      <div class="section-label">SETTINGS</div>
+      <div class="btn-row">
+        <button class="btn btn-dim" onclick="reconfigure()">⟳  RECONFIGURE PATH</button>
+        <button class="btn btn-red" onclick="resetSettings()">↺  RESET SETTINGS</button>
+      </div>
+
+      <hr class="divider">
+
+      <!-- Debug Log -->
+      <div class="section-label">DEBUG LOG</div>
+      <div class="log-content" id="logContent">Loading...</div>
+      <div class="status" id="logStatus"></div>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" onclick="copyLog()">📋  COPY LOG</button>
+        <button class="btn btn-red" onclick="clearLog()">🗑  CLEAR LOG</button>
+      </div>
+
+    </div>
+  </div>
+
+</div><!-- end #app -->
+
+<script>
+// ── state ──────────────────────────────────────────────────────────────────
+let state = {};
+let netMap = {};
+let netMapMain = {};
+
+// ── boot sequence ─────────────────────────────────────────────────────────
+const bootLines = [
+  "FOURTH ECHELON NETWORK SYSTEM v4.6",
+  "INITIALIZING SECURE CHANNEL...",
+  "LOADING CONVICTION PROTOCOL...",
+  "LAN SUBSYSTEM ONLINE",
+  "READY."
+];
+
+async function boot() {
+  const container = document.getElementById('bootLines');
+  for (let i = 0; i < bootLines.length; i++) {
+    await delay(180);
+    const d = document.createElement('div');
+    d.className = 'boot-line';
+    d.style.animationDelay = '0s';
+    d.textContent = bootLines[i];
+    container.appendChild(d);
+  }
+  await delay(400);
+  document.getElementById('bootScreen').classList.add('fade-out');
+  await delay(500);
+  document.getElementById('bootScreen').remove();
+
+  // Load state and show correct screen
+  state = await pywebview.api.get_state();
+  if (state.setup_done && state.game_dir) {
+    showMain();
+  } else {
+    updateDirDisplay();
+  }
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── progress dots ──────────────────────────────────────────────────────────
+function renderProgress(screenId, current) {
+  const el = document.getElementById('progress-' + screenId);
+  if (!el) return;
+  let html = '';
+  for (let i = 0; i < 6; i++) {
+    if (i < current) html += '<div class="dot done"></div>';
+    else if (i === current) html += '<div class="dot active"></div>';
+    else html += '<div class="dot"></div>';
+  }
+  el.innerHTML = html;
+}
+
+// ── screen navigation ──────────────────────────────────────────────────────
+function goToStep(n) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-' + n).classList.add('active');
+  renderProgress(n, n);
+  document.getElementById('headerRight').textContent = n < 6 ? `SETUP  ${n}/5` : 'LAN LAUNCHER';
+  document.getElementById('app').scrollTop = 0;
+
+  if (n === 4) loadIPScreen();
+  if (n === 6) showMain();
+}
+
+function showMain() {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById('screen-6').classList.add('active');
+  document.getElementById('headerRight').textContent = 'LAN LAUNCHER';
+  document.getElementById('app').scrollTop = 0;
+  document.getElementById('mainDirDisplay').textContent = state.game_dir || 'Not set';
+  loadIPMain();
+  loadLog();
+  scanNetsMain();
+}
+
+// ── directory ──────────────────────────────────────────────────────────────
+function updateDirDisplay() {
+  const el = document.getElementById('dirDisplay');
+  if (state.game_dir) {
+    el.textContent = state.game_dir;
+    el.classList.remove('empty');
+  } else {
+    el.textContent = 'No directory selected';
+    el.classList.add('empty');
+  }
+}
+
+async function browseDir() {
+  setStatus('dirStatus', 'warn', 'Opening folder browser...');
+  const res = await pywebview.api.browse_directory();
+  if (res.ok) {
+    state.game_dir = res.path;
+    updateDirDisplay();
+    setStatus('dirStatus', 'ok', 'Directory set: ' + res.path);
+    document.getElementById('installDesc').textContent = 'Files will be copied to: ' + res.path;
+  } else {
+    setStatus('dirStatus', 'err', res.error || 'Cancelled');
+  }
+}
+
+function nextFromDir() {
+  if (!state.game_dir) {
+    setStatus('dirStatus', 'warn', 'Please select a game directory first.');
+    return;
+  }
+  goToStep(2);
+}
+
+// ── DLC ────────────────────────────────────────────────────────────────────
+async function installDLC2() {
+  setStatus('dlcStatus2', 'warn', 'Opening folder browser...');
+  setBtnLoading('dlcBtn2', true, 'Installing...');
+  const folderRes = await pywebview.api.browse_dlc_directory();
+  if (!folderRes.ok) {
+    setStatus('dlcStatus2', 'warn', 'Cancelled.');
+    setBtnLoading('dlcBtn2', false, '📦  INSTALL INSURGENCY PACK DLC');
+    return;
+  }
+  setStatus('dlcStatus2', 'warn', 'Copying DLC files...');
+  const res = await pywebview.api.install_dlc(folderRes.path);
+  setBtnLoading('dlcBtn2', false, '📦  INSTALL INSURGENCY PACK DLC');
+  if (res.ok) setStatus('dlcStatus2', 'ok', 'Insurgency Pack DLC installed successfully.');
+  else setStatus('dlcStatus2', 'err', 'DLC install failed: ' + res.error);
+}
+
+// ── install files ──────────────────────────────────────────────────────────
+async function installFiles() {
+  setBtnLoading('installBtn', true, 'Copying files...');
+  setStatus('installStatus', 'warn', 'Copying files to game directory...');
+  const res = await pywebview.api.install_files();
+  setBtnLoading('installBtn', false, '▶  INSTALL FILES');
+  if (res.ok) {
+    setStatus('installStatus', 'ok', 'Files installed successfully.');
+    document.getElementById('installNextBtn').disabled = false;
+  } else {
+    setStatus('installStatus', 'err', 'Install failed: ' + res.error);
+  }
+}
+
+function nextFromInstall() {
+  goToStep(4);
+}
+
+// ── IP ─────────────────────────────────────────────────────────────────────
+let ipNetMap4 = {};
+let ipNetMapMain = {};
+
+async function loadIPScreen() {
+  const res = await pywebview.api.get_server_addr();
+  if (res.ok) document.getElementById('ipInput4').value = res.ip || '';
+  scanNets4();
+}
+
+async function scanNets4() {
+  const res = await pywebview.api.get_local_ips();
+  const sel = document.getElementById('netSelect4');
+  ipNetMap4 = {};
+  if (res.ok && res.ips.length > 0) {
+    sel.innerHTML = res.ips.map(i => `<option value="${i.ip}">${i.label}</option>`).join('');
+    res.ips.forEach(i => ipNetMap4[i.ip] = i.ip);
+  } else {
+    sel.innerHTML = '<option>No interfaces detected</option>';
+  }
+}
+
+async function loadIPMain() {
+  const res = await pywebview.api.get_server_addr();
+  if (res.ok) document.getElementById('ipInputMain').value = res.ip || '';
+}
+
+async function scanNetsMain() {
+  const res = await pywebview.api.get_local_ips();
+  const sel = document.getElementById('netSelectMain');
+  ipNetMapMain = {};
+  if (res.ok && res.ips.length > 0) {
+    sel.innerHTML = res.ips.map(i => `<option value="${i.ip}">${i.label}</option>`).join('');
+  } else {
+    sel.innerHTML = '<option>No interfaces detected</option>';
+  }
+}
+
+function useDetectedIP(screen) {
+  if (screen === 4) {
+    const sel = document.getElementById('netSelect4');
+    document.getElementById('ipInput4').value = sel.value;
+    setStatus('ipStatus4', 'ok', 'IP set from interface.');
+  } else {
+    const sel = document.getElementById('netSelectMain');
+    document.getElementById('ipInputMain').value = sel.value;
+    setStatus('ipStatusMain', 'ok', 'IP set from interface.');
+  }
+}
+
+async function saveIP(screen) {
+  const inputId = screen === 4 ? 'ipInput4' : 'ipInputMain';
+  const statusId = screen === 4 ? 'ipStatus4' : 'ipStatusMain';
+  const ip = document.getElementById(inputId).value.trim();
+  if (!ip) { setStatus(statusId, 'warn', 'Enter an IP address.'); return; }
+  setStatus(statusId, 'warn', 'Saving...');
+  const res = await pywebview.api.save_server_addr(ip);
+  if (res.ok) setStatus(statusId, 'ok', `Saved  ServerAddr = ${ip}`);
+  else setStatus(statusId, 'err', 'Save failed: ' + res.error);
+}
+
+// ── shortcuts + finish ─────────────────────────────────────────────────────
+async function finishSetup() {
+  const launcher = document.getElementById('launcherShortcut').checked;
+  const helper = document.getElementById('helperShortcut').checked;
+  const desktop = document.getElementById('desktopCheck').checked;
+  const startmenu = document.getElementById('startmenuCheck').checked;
+  setStatus('shortcutStatus', 'warn', 'Creating shortcuts...');
+  const res = await pywebview.api.finish_setup(launcher, helper, desktop, startmenu);
+  if (res.ok) {
+    state.setup_done = true;
+    setStatus('shortcutStatus', 'ok', 'Setup complete!');
+    await delay(600);
+    showMain();
+  } else {
+    setStatus('shortcutStatus', 'err', 'Error: ' + res.error);
+  }
+}
+
+// ── main screen actions ────────────────────────────────────────────────────
+async function launchHelper() {
+  setStatus('launchStatus', 'warn', 'Launching...');
+  const res = await pywebview.api.launch_helper();
+  if (res.ok) setStatus('launchStatus', 'ok', 'Launched successfully.');
+  else setStatus('launchStatus', 'err', 'Launch failed: ' + res.error);
+}
+
+async function reinstallFiles() {
+  setBtnLoading('reinstallBtn', true, 'Copying...');
+  setStatus('actionStatus', 'warn', 'Copying files...');
+  const res = await pywebview.api.install_files();
+  setBtnLoading('reinstallBtn', false, '▶  REINSTALL FILES');
+  if (res.ok) setStatus('actionStatus', 'ok', 'Files reinstalled.');
+  else setStatus('actionStatus', 'err', 'Reinstall failed: ' + res.error);
+}
+
+async function installDLCMain() {
+  setBtnLoading('dlcBtnMain', true, 'Installing...');
+  const folderRes = await pywebview.api.browse_dlc_directory();
+  if (!folderRes.ok) { setBtnLoading('dlcBtnMain', false, '📦  INSTALL DLC'); return; }
+  setStatus('actionStatus', 'warn', 'Copying DLC files...');
+  const res = await pywebview.api.install_dlc(folderRes.path);
+  setBtnLoading('dlcBtnMain', false, '📦  INSTALL DLC');
+  if (res.ok) setStatus('actionStatus', 'ok', 'DLC installed.');
+  else setStatus('actionStatus', 'err', 'DLC failed: ' + res.error);
+}
+
+function reconfigure() {
+  if (confirm('Change the game directory? This will restart the setup wizard.')) {
+    const also = confirm('Also clear the saved IP and reinstall flag?');
+    pywebview.api.reset_settings(also).then(() => {
+      state.setup_done = false;
+      if (also) state.game_dir = '';
+      updateDirDisplay();
+      goToStep(also ? 0 : 1);
+    });
+  }
+}
+
+function resetSettings() {
+  if (confirm('Reset all settings? You will be returned to setup.')) {
+    const also = confirm('Also clear the game directory path?');
+    pywebview.api.reset_settings(also).then(() => {
+      state.setup_done = false;
+      if (also) state.game_dir = '';
+      updateDirDisplay();
+      goToStep(0);
+    });
+  }
+}
+
+// ── log ────────────────────────────────────────────────────────────────────
+async function loadLog() {
+  const res = await pywebview.api.get_log();
+  const el = document.getElementById('logContent');
+  if (res.content) {
+    el.textContent = res.content;
+    el.scrollTop = el.scrollHeight;
+  } else {
+    el.textContent = 'No log entries yet.';
+  }
+}
+
+async function copyLog() {
+  const res = await pywebview.api.get_log();
+  if (res.content) {
+    try {
+      await navigator.clipboard.writeText(res.content);
+      setStatus('logStatus', 'ok', 'Log copied to clipboard.');
+    } catch(e) {
+      // Fallback for Wine
+      const ta = document.createElement('textarea');
+      ta.value = res.content;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      setStatus('logStatus', 'ok', 'Log copied to clipboard.');
+    }
+  } else {
+    setStatus('logStatus', 'warn', 'No log to copy.');
+  }
+}
+
+async function clearLog() {
+  if (confirm('Delete the debug log? This cannot be undone.')) {
+    const res = await pywebview.api.clear_log();
+    if (res.ok) { setStatus('logStatus', 'ok', 'Log cleared.'); loadLog(); }
+    else setStatus('logStatus', 'err', 'Could not clear log.');
+  }
+}
+
+// ── helpers ────────────────────────────────────────────────────────────────
+function setStatus(id, type, msg) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.className = 'status ' + type;
+  el.textContent = (type === 'ok' ? '✔  ' : type === 'err' ? '✘  ' : '⚠  ') + msg;
+}
+
+function clearStatus(id) {
+  const el = document.getElementById(id);
+  if (el) { el.className = 'status'; el.textContent = ''; }
+}
+
+function setBtnLoading(id, loading, text) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.disabled = loading;
+  el.textContent = text;
+}
+
+// ── start ──────────────────────────────────────────────────────────────────
+window.addEventListener('pywebviewready', boot);
+</script>
+</body>
+</html>
+"""
 
 # ── entry ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = App()
-    app.mainloop()
+    api = Api()
+    window = webview.create_window(
+        "SCC LAN Launcher",
+        html=HTML,
+        js_api=api,
+        width=640,
+        height=780,
+        min_size=(520, 600),
+        background_color="#060608",
+        text_select=False
+    )
+    webview.start(debug=False)
