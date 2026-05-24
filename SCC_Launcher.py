@@ -72,23 +72,58 @@ def get_ini_path(game_dir):
 def get_exe_path(game_dir):
     return os.path.join(game_dir, EXE_REL)
 
+def _read_ini(ini_path):
+    """Read an ini file, stripping // comments that configparser can't handle."""
+    cfg = configparser.ConfigParser()
+    with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+    # Strip lines that start with // (C-style comments)
+    cleaned = "".join(l for l in lines if not l.strip().startswith("//"))
+    cfg.read_string(cleaned)
+    return cfg
+
 def read_server_addr(game_dir):
     ini_path = get_ini_path(game_dir)
     if not os.path.exists(ini_path):
         return ""
-    cfg = configparser.ConfigParser()
-    cfg.read(ini_path)
+    cfg = _read_ini(ini_path)
     return cfg.get("LAN", "ServerAddr", fallback="")
 
 def write_server_addr(game_dir, ip):
     ini_path = get_ini_path(game_dir)
-    cfg = configparser.ConfigParser()
-    cfg.read(ini_path)
-    if not cfg.has_section("LAN"):
-        cfg.add_section("LAN")
-    cfg.set("LAN", "ServerAddr", ip)
-    with open(ini_path, "w") as f:
-        cfg.write(f)
+    # Read raw lines so we preserve // comments and formatting
+    with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+        lines = f.readlines()
+
+    new_lines = []
+    in_lan = False
+    written = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.lower() == "[lan]":
+            in_lan = True
+            new_lines.append(line)
+            continue
+        if stripped.startswith("[") and stripped.lower() != "[lan]":
+            in_lan = False
+        if in_lan and stripped.lower().startswith("serveraddr"):
+            new_lines.append(f"ServerAddr = {ip}\n")
+            written = True
+        else:
+            new_lines.append(line)
+
+    # If ServerAddr wasn't found, add it under [LAN]
+    if not written:
+        result = []
+        in_lan = False
+        for line in new_lines:
+            result.append(line)
+            if line.strip().lower() == "[lan]":
+                result.append(f"ServerAddr = {ip}\n")
+        new_lines = result
+
+    with open(ini_path, "w", encoding="utf-8") as f:
+        f.writelines(new_lines)
 
 def copy_src_to_dir(dest):
     for item in os.listdir(SRC_DIR):
