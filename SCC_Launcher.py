@@ -311,8 +311,7 @@ Categories=Game;
             pass
     return results
 
-def create_shortcuts(target, shortcut_types):
-    name = "SCC LAN Launcher"
+def create_shortcuts(target, shortcut_types, name="SCC LAN Launcher"):
     if sys.platform == "win32":
         return create_shortcut_windows(target, name, shortcut_types)
     else:
@@ -879,17 +878,35 @@ class App(tk.Tk):
         tk.Label(f, text="CREATE SHORTCUTS", font=FONT_HEAD,
                  fg=ORANGE, bg=BG).pack(anchor="w", padx=20, pady=(20,4))
         tk.Label(f,
-            text="Select where to create shortcuts for the launcher.\nAt least one is recommended so you can launch from the game directory.",
+            text="Optionally create shortcuts for quick access.\nThe launcher stays wherever you saved it — nothing gets moved.",
             font=FONT_BODY, fg=DIM, bg=BG, justify="left").pack(anchor="w", padx=20, pady=(0,12))
 
+        # Where to place shortcuts
         desktop_var   = tk.BooleanVar(value=True)
         startmenu_var = tk.BooleanVar(value=False)
 
-        panel = self._hud_panel(f)
-        for text, var in [("Desktop shortcut", desktop_var),
-                          ("Start Menu / App launcher shortcut", startmenu_var)]:
-            row = tk.Frame(panel, bg=PANEL)
-            row.pack(fill="x", padx=12, pady=4)
+        self._section_label(f, "SHORTCUT LOCATION")
+        loc_panel = self._hud_panel(f, pady=(2,8))
+        for text, var in [("Desktop", desktop_var),
+                          ("Start Menu / App Launcher", startmenu_var)]:
+            row = tk.Frame(loc_panel, bg=PANEL)
+            row.pack(fill="x", padx=12, pady=3)
+            tk.Checkbutton(row, text=text, variable=var,
+                           font=FONT_BODY, fg=WHITE, bg=PANEL,
+                           selectcolor=BG2, activebackground=PANEL,
+                           activeforeground=ORANGE,
+                           relief="flat").pack(side="left")
+
+        # What to create shortcuts for
+        launcher_shortcut_var = tk.BooleanVar(value=True)
+        helper_shortcut_var   = tk.BooleanVar(value=True)
+
+        self._section_label(f, "CREATE SHORTCUT FOR")
+        what_panel = self._hud_panel(f, pady=(2,8))
+        for text, var in [("SCC LAN Launcher  (this app)", launcher_shortcut_var),
+                          ("SCC LAN Helper  (game helper exe)", helper_shortcut_var)]:
+            row = tk.Frame(what_panel, bg=PANEL)
+            row.pack(fill="x", padx=12, pady=3)
             tk.Checkbutton(row, text=text, variable=var,
                            font=FONT_BODY, fg=WHITE, bg=PANEL,
                            selectcolor=BG2, activebackground=PANEL,
@@ -904,75 +921,36 @@ class App(tk.Tk):
         nav.pack(fill="x", padx=20, pady=(0,20))
         self._btn(nav, "◀  BACK", lambda: self._show_step(4), bg=DIM2, fg=DIM).pack(side="left")
 
-        def _do_finish(shortcut_types, finish_btn, _stop_spin=None):
-            # Run on background thread to avoid freezing UI
-            new_exe = None
-            via_script = False
-            try:
-                new_exe, via_script = self_install(self.game_dir)
-                log(f"Launcher self-installed to: {new_exe} (via_script={via_script})", game_dir=self.game_dir)
-            except Exception as e:
-                log_exception("Self-install failed", e, self.game_dir)
+        def finish():
+            shortcut_types = []
+            if desktop_var.get():    shortcut_types.append("desktop")
+            if startmenu_var.get():  shortcut_types.append("startmenu")
 
-            if shortcut_types and new_exe:
+            if getattr(sys, "frozen", False):
+                launcher_exe = sys.executable
+            else:
+                launcher_exe = os.path.abspath(__file__)
+            helper_exe = get_exe_path(self.game_dir)
+
+            if launcher_shortcut_var.get() and shortcut_types:
                 try:
-                    create_shortcuts(new_exe, shortcut_types)
-                    log(f"Shortcuts created: {shortcut_types}", game_dir=self.game_dir)
+                    create_shortcuts(launcher_exe, shortcut_types, name="SCC LAN Launcher")
+                    log(f"Launcher shortcuts created: {shortcut_types}", game_dir=self.game_dir)
                 except Exception as e:
-                    log_exception("Shortcut creation failed", e, self.game_dir)
+                    log_exception("Launcher shortcut failed", e, self.game_dir)
+
+            if helper_shortcut_var.get() and shortcut_types:
+                try:
+                    create_shortcuts(helper_exe, shortcut_types, name="SCC LAN Helper")
+                    log(f"Helper shortcuts created: {shortcut_types}", game_dir=self.game_dir)
+                except Exception as e:
+                    log_exception("Helper shortcut failed", e, self.game_dir)
 
             self.setup_done = True
             self._save()
+            self._show_main()
 
-            # Schedule UI update back on main thread
-            def _on_done():
-                if _stop_spin: _stop_spin()
-                finish_btn.config(state="normal", text="✔  FINISH  &  LAUNCH")
-                if via_script:
-                    # Batch script is already running waiting for us to exit
-                    self._ok(status, "Copying launcher... closing to complete install.")
-                    messagebox.showinfo("Setup Complete",
-                        "Setup is complete!\n\nThe launcher will now close and automatically "
-                        "reopen from your game directory.")
-                elif new_exe:
-                    self._ok(status, "Setup complete!")
-                    f.after(800, self._show_main)
-                else:
-                    self._ok(status, "Setup complete!")
-                    f.after(800, self._show_main)
-            f.after(0, _on_done)
-
-        # Spinner animation
-        spinner_chars = ["◆  ", " ◆ ", "  ◆"]
-        spinner_idx = [0]
-        spinner_id = [None]
-
-        def _spin():
-            if spinner_id[0] is not None:
-                c = spinner_chars[spinner_idx[0] % len(spinner_chars)]
-                status.config(text=f"{c} Copying launcher to game directory, please wait...")
-                spinner_idx[0] += 1
-                spinner_id[0] = f.after(300, _spin)
-
-        def _stop_spin():
-            if spinner_id[0] is not None:
-                f.after_cancel(spinner_id[0])
-                spinner_id[0] = None
-
-        def finish():
-            shortcut_types = []
-            if desktop_var.get():   shortcut_types.append("desktop")
-            if startmenu_var.get(): shortcut_types.append("startmenu")
-
-            finish_btn.config(state="disabled", text="Please wait...")
-            spinner_id[0] = "start"
-            _spin()
-
-            t = threading.Thread(target=_do_finish, args=(shortcut_types, finish_btn, _stop_spin), daemon=True)
-            t.start()
-
-        finish_btn = self._btn(nav, "✔  FINISH  &  LAUNCH", finish, large=True)
-        finish_btn.pack(side="right")
+        self._btn(nav, "✔  FINISH", finish, large=True).pack(side="right")
         return f
 
     # ══════════════════════════════════════════════════════════════════════════
