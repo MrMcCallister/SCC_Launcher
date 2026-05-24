@@ -19,25 +19,19 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install pyinstaller requests
-
-      - name: Download Bebas Neue font
-        run: |
-          python -c "
-          import urllib.request, os
-          url = 'https://github.com/google/fonts/raw/refs/heads/main/ofl/bebasneuepro/BebasNeuePro-Regular.ttf'
-          try:
-              urllib.request.urlretrieve(url, 'BebasNeue.ttf')
-              print('Downloaded Bebas Neue Pro')
-          except:
-              # Fallback - use a basic condensed font approach
-              print('Font download failed, will use system font fallback')
-          "
+        run: pip install pyinstaller pywebview
 
       - name: Build EXE
         working-directory: ${{ github.workspace }}
         run: |
-          pyinstaller --onefile --windowed --name "SCC_LAN_Launcher" --add-data "src;src" "${{ github.workspace }}\SCC_Launcher.py"
+          pyinstaller `
+            --onefile `
+            --windowed `
+            --name "SCC_LAN_Launcher" `
+            --add-data "src;src" `
+            --hidden-import "webview.platforms.winforms" `
+            --hidden-import "clr" `
+            "${{ github.workspace }}\SCC_Launcher.py"
 
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
