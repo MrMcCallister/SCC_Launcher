@@ -103,13 +103,9 @@ def write_server_addr(game_dir, ip):
         cfg.write(f)
 
 def copy_src_to_dir(dest):
-    for item in os.listdir(SRC_DIR):
-        s = os.path.join(SRC_DIR, item)
-        d = os.path.join(dest, item)
-        if os.path.isdir(s):
-            shutil.copytree(s, d, dirs_exist_ok=True)
-        else:
-            shutil.copy2(s, d)
+    """Copy the entire src/ folder into dest, so result is dest/src/..."""
+    d = os.path.join(dest, "src")
+    shutil.copytree(SRC_DIR, d, dirs_exist_ok=True)
 
 def copy_dlc_to_dir(dlc_folder, game_dir):
     for item in os.listdir(dlc_folder):
