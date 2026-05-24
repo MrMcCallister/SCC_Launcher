@@ -21,18 +21,13 @@ jobs:
       - name: Install PyInstaller
         run: pip install pyinstaller
  
-      - name: List files (debug)
-        run: |
-          echo "Workspace: ${{ github.workspace }}"
-          dir ${{ github.workspace }}
-          dir ${{ github.workspace }}\src
- 
       - name: Build EXE
         run: |
-          pyinstaller --onefile --windowed --name "SCC_LAN_Launcher" --add-data "src;src" "${{ github.workspace }}\launcher.py"
+          pyinstaller --onefile --windowed --name "SCC_LAN_Launcher" --add-data "src;src" "${{ github.workspace }}\SCC_Launcher.py"
  
       - name: Upload EXE as artifact
         uses: actions/upload-artifact@v4
         with:
           name: SCC_LAN_Launcher
           path: dist\SCC_LAN_Launcher.exe
+
