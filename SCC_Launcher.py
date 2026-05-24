@@ -744,20 +744,33 @@ class App(tk.Tk):
         status = self._status_label(f)
         installed = [False]
 
-        def install():
+        def _do_install(btn):
             try:
                 log(f"Installing files to: {self.game_dir}", game_dir=self.game_dir)
                 copy_src_to_dir(self.game_dir)
                 log("Files copied successfully.", game_dir=self.game_dir)
-                self._ok(status, "Files installed successfully.")
-                installed[0] = True
+                def _done():
+                    btn.config(state="normal", text="▶  INSTALL FILES")
+                    self._ok(status, "Files installed successfully.")
+                    installed[0] = True
+                f.after(0, _done)
             except Exception as e:
                 log_exception("Install failed", e, self.game_dir)
-                self._err(status, "Install failed. Check debug log.")
+                def _fail():
+                    btn.config(state="normal", text="▶  INSTALL FILES")
+                    self._err(status, "Install failed. Check debug log.")
+                f.after(0, _fail)
+
+        def install():
+            install_btn.config(state="disabled", text="Copying files...")
+            self._warn(status, "Copying files, please wait...")
+            t = threading.Thread(target=_do_install, args=(install_btn,), daemon=True)
+            t.start()
 
         btn_row = tk.Frame(f, bg=BG)
         btn_row.pack(anchor="w", padx=20, pady=(8,0))
-        self._btn(btn_row, "▶  INSTALL FILES", install, large=True).pack()
+        install_btn = self._btn(btn_row, "▶  INSTALL FILES", install, large=True)
+        install_btn.pack()
 
         self._divider(f)
 
@@ -1071,14 +1084,17 @@ class App(tk.Tk):
                 self._err(launch_status, "Launch failed. Check debug log.")
 
         def reinstall():
-            try:
-                log(f"Reinstalling files to: {self.game_dir}", game_dir=self.game_dir)
-                copy_src_to_dir(self.game_dir)
-                log("Files reinstalled.", game_dir=self.game_dir)
-                self._ok(install_status, "Files reinstalled.")
-            except Exception as e:
-                log_exception("Reinstall failed", e, self.game_dir)
-                self._err(install_status, "Reinstall failed.")
+            def _do():
+                try:
+                    log(f"Reinstalling files to: {self.game_dir}", game_dir=self.game_dir)
+                    copy_src_to_dir(self.game_dir)
+                    log("Files reinstalled.", game_dir=self.game_dir)
+                    f.after(0, lambda: self._ok(install_status, "Files reinstalled."))
+                except Exception as e:
+                    log_exception("Reinstall failed", e, self.game_dir)
+                    f.after(0, lambda: self._err(install_status, "Reinstall failed."))
+            self._warn(install_status, "Copying files, please wait...")
+            threading.Thread(target=_do, daemon=True).start()
 
         def install_dlc():
             dlc = filedialog.askdirectory(title="Select Extracted Insurgency Pack DLC Folder")
