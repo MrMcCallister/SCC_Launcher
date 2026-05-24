@@ -241,7 +241,6 @@ DIM       = "#444440"
 DIM2      = "#222220"
 GREEN_HUD = "#4aff91"
 RED_HUD   = "#ff4a4a"
-SCAN      = "#ffffff08"
 
 FONT_TITLE  = ("Courier New", 22, "bold")
 FONT_HEAD   = ("Courier New", 11, "bold")
@@ -499,9 +498,6 @@ class App(tk.Tk):
         art.create_oval(cx-80, cy-30, cx+80, cy+30, outline=ORANGE, width=2)
         art.create_oval(cx-20, cy-20, cx+20, cy+20, fill=ORANGE, outline="")
         art.create_oval(cx-8, cy-8, cx+8, cy+8, fill=BG, outline="")
-        # scan lines
-        for y in range(0, 120, 6):
-            art.create_line(0, y, 480, y, fill=SCAN, width=1)
         # corner brackets
         for x1,y1,x2,y2,x3,y3 in [
             (0,20,0,0,20,0),(460,0,480,0,480,20),
