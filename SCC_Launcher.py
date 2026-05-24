@@ -149,18 +149,134 @@ def copy_dlc_to_dir(dlc_folder, game_dir):
         else:
             shutil.copy2(s, d)
 
+def is_wine():
+    """Detect if we are running inside Wine on Linux."""
+    # Wine sets WINELOADERNOEXEC or exposes a wine registry path
+    if os.environ.get("WINELOADERNOEXEC"):
+        return True
+    # Check for Wine-specific file
+    if os.path.exists("/proc/version"):
+        try:
+            with open("/proc/version") as f:
+                return True  # /proc exists = real Linux kernel under Wine
+        except:
+            pass
+    # Check for Z: drive mapping (Wine maps / to Z:)
+    if sys.platform == "win32" and os.path.exists("Z:\\"):
+        return True
+    return False
+
+def wine_to_unix(path):
+    """Convert a Wine path like Z:\\home\\user\\... to /home/user/..."""
+    if path.startswith("Z:\\") or path.startswith("Z:/"):
+        return path[2:].replace("\\", "/").replace("\\", "/")
+    # Try using winepath if available
+    try:
+        result = subprocess.run(
+            ["winepath", "-u", path],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except:
+        pass
+    return path
+
+def unix_to_wine(path):
+    """Convert a Unix path to Wine Z: path."""
+    try:
+        result = subprocess.run(
+            ["winepath", "-w", path],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except:
+        pass
+    return "Z:" + path.replace("/", "\\")
+
 def self_install(game_dir):
-    """Copy this launcher exe into src/system/ of the game directory."""
+    """
+    Copy this launcher exe into src/system/ of the game directory.
+    Handles Windows native, Wine on Linux, and plain Linux.
+    Returns (dest_exe, needs_relaunch_via_script).
+    """
     if getattr(sys, 'frozen', False):
         src_exe = sys.executable
     else:
         src_exe = os.path.abspath(__file__)
+
     dest_dir = os.path.join(game_dir, "src", "system")
     os.makedirs(dest_dir, exist_ok=True)
     dest_exe = os.path.join(dest_dir, os.path.basename(src_exe))
-    if os.path.abspath(src_exe) != os.path.abspath(dest_exe):
+
+    # Already running from destination — nothing to do
+    if os.path.abspath(src_exe).lower() == os.path.abspath(dest_exe).lower():
+        return dest_exe, False
+
+    running_under_wine = is_wine()
+
+    if running_under_wine and getattr(sys, 'frozen', False):
+        # Running as .exe under Wine on Linux
+        # Convert paths to real Linux paths for the shell script
+        src_unix  = wine_to_unix(src_exe)
+        dest_unix = wine_to_unix(dest_exe)
+        dest_wine = unix_to_wine(dest_unix)
+        pid = os.getpid()
+
+        sh_path = os.path.join(os.path.expanduser("~"), "_scc_install.sh")
+        # expanduser under Wine returns a Wine path — convert it
+        sh_unix = wine_to_unix(sh_path)
+        if not sh_unix.startswith("/"):
+            sh_unix = os.path.join("/tmp", "_scc_install.sh")
+
+        sh = f"""#!/bin/bash
+# Wait for Wine process to exit
+while kill -0 {pid} 2>/dev/null; do
+    sleep 0.5
+done
+sleep 1
+cp -f "{src_unix}" "{dest_unix}"
+chmod +x "{dest_unix}"
+# Relaunch via Wine using the wine path
+WINEPREFIX="$(dirname $(dirname $(dirname $(dirname "{dest_unix}"))))" wine "{dest_wine}" &
+rm -- "$0"
+"""
+        with open(sh_unix, "w") as sf:
+            sf.write(sh)
+        os.chmod(sh_unix, 0o755)
+        subprocess.Popen(["/bin/bash", sh_unix],
+                         start_new_session=True,
+                         close_fds=True)
+        return dest_exe, True
+
+    elif sys.platform == "win32" and getattr(sys, 'frozen', False):
+        # Native Windows — use batch script
+        bat_path = os.path.join(os.path.expanduser("~"), "_scc_install.bat")
+        bat = f"""@echo off
+:wait
+timeout /t 1 /nobreak >nul
+tasklist /fi "PID eq {os.getpid()}" | find "{os.getpid()}" >nul 2>&1
+if not errorlevel 1 goto wait
+copy /y "{src_exe}" "{dest_exe}"
+start "" "{dest_exe}"
+del "%~f0"
+"""
+        with open(bat_path, "w") as bf:
+            bf.write(bat)
+        subprocess.Popen(["cmd", "/c", bat_path],
+                         creationflags=subprocess.CREATE_NO_WINDOW,
+                         close_fds=True)
+        return dest_exe, True
+
+    else:
+        # Plain Linux .py script or non-frozen — direct copy is fine
         shutil.copy2(src_exe, dest_exe)
-    return dest_exe
+        try:
+            os.chmod(dest_exe, 0o755)
+        except:
+            pass
+        return dest_exe, False
 
 def create_shortcut_windows(target, name, shortcut_types):
     """Create Windows shortcuts using PowerShell."""
@@ -804,23 +920,16 @@ class App(tk.Tk):
         nav.pack(fill="x", padx=20, pady=(0,20))
         self._btn(nav, "◀  BACK", lambda: self._show_step(4), bg=DIM2, fg=DIM).pack(side="left")
 
-        def finish():
-            shortcut_types = []
-            if desktop_var.get():   shortcut_types.append("desktop")
-            if startmenu_var.get(): shortcut_types.append("startmenu")
-
-            # Self-install
+        def _do_finish(shortcut_types, finish_btn):
+            # Run on background thread to avoid freezing UI
+            new_exe = None
+            via_script = False
             try:
-                self._warn(status, "Copying launcher to game directory...")
-                f.update()
-                new_exe = self_install(self.game_dir)
-                log(f"Launcher self-installed to: {new_exe}", game_dir=self.game_dir)
+                new_exe, via_script = self_install(self.game_dir)
+                log(f"Launcher self-installed to: {new_exe} (via_script={via_script})", game_dir=self.game_dir)
             except Exception as e:
                 log_exception("Self-install failed", e, self.game_dir)
-                self._err(status, "Could not copy launcher. Continuing anyway.")
-                new_exe = None
 
-            # Shortcuts
             if shortcut_types and new_exe:
                 try:
                     create_shortcuts(new_exe, shortcut_types)
@@ -831,14 +940,39 @@ class App(tk.Tk):
             self.setup_done = True
             self._save()
 
-            if new_exe and os.path.abspath(new_exe) != os.path.abspath(sys.executable if getattr(sys,'frozen',False) else __file__):
-                messagebox.showinfo("Setup Complete",
-                    "Setup is complete!\n\nThe launcher has been copied to your game directory and will now restart from there.")
-                relaunch(new_exe, self.game_dir)
-            else:
-                self._show_main()
+            # Schedule UI update back on main thread
+            def _on_done():
+                finish_btn.config(state="normal", text="✔  FINISH  &  LAUNCH")
+                if via_script:
+                    # Batch script is already running waiting for us to exit
+                    self._ok(status, "Copying launcher... closing to complete install.")
+                    messagebox.showinfo("Setup Complete",
+                        "Setup is complete!
 
-        self._btn(nav, "✔  FINISH  &  LAUNCH", finish, large=True).pack(side="right")
+The launcher will now close and automatically "
+                        "reopen from your game directory.")
+                    sys.exit(0)
+                elif new_exe:
+                    self._ok(status, "Setup complete!")
+                    f.after(800, self._show_main)
+                else:
+                    self._ok(status, "Setup complete!")
+                    f.after(800, self._show_main)
+            f.after(0, _on_done)
+
+        def finish():
+            shortcut_types = []
+            if desktop_var.get():   shortcut_types.append("desktop")
+            if startmenu_var.get(): shortcut_types.append("startmenu")
+
+            finish_btn.config(state="disabled", text="Working...")
+            self._warn(status, "Copying launcher to game directory, please wait...")
+
+            t = threading.Thread(target=_do_finish, args=(shortcut_types, finish_btn), daemon=True)
+            t.start()
+
+        finish_btn = self._btn(nav, "✔  FINISH  &  LAUNCH", finish, large=True)
+        finish_btn.pack(side="right")
         return f
 
     # ══════════════════════════════════════════════════════════════════════════
