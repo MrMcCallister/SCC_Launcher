@@ -5,6 +5,27 @@ import threading, time, re, json
 import struct
 
 # ── resource path ─────────────────────────────────────────────────────────────
+# Detect Wine once at startup so we can apply Linux-specific fixes throughout
+def _detect_wine():
+    if os.environ.get("WINELOADERNOEXEC"):
+        return True
+    if sys.platform == "win32" and os.path.exists("Z:\\"):
+        try:
+            import ctypes
+            ntdll = ctypes.windll.ntdll
+            return hasattr(ntdll, 'wine_get_version')
+        except:
+            pass
+    if sys.platform == "win32":
+        try:
+            if os.path.exists("/proc/version"):
+                return True
+        except:
+            pass
+    return False
+
+WINE = _detect_wine()
+
 def resource_path(relative):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative)
@@ -62,17 +83,14 @@ def log_exception(context, exc, game_dir=None):
 def get_local_ips():
     """Return list of (interface_name, ip) for all active non-loopback interfaces."""
     ips = []
+    seen = set()
     try:
-        import socket
-        # Get all IPs by connecting to external address (doesn't actually send data)
         hostname = socket.gethostname()
         all_ips = socket.getaddrinfo(hostname, None)
-        seen = set()
         for item in all_ips:
             ip = item[4][0]
             if ip not in seen and not ip.startswith("127.") and ":" not in ip:
                 seen.add(ip)
-                # Try to guess interface type
                 if ip.startswith("25."):
                     label = f"Hamachi  ({ip})"
                 elif ip.startswith("100."):
@@ -88,26 +106,60 @@ def get_local_ips():
                 ips.append((label, ip))
     except:
         pass
-    # Also try socket approach
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.settimeout(1)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        if ip and not any(i[1] == ip for i in ips):
+        if ip and ip not in seen:
             ips.append((f"Primary Network  ({ip})", ip))
     except:
         pass
     return ips
 
+def populate_nets_async(widget_ref, net_var, net_map, dropdown_widget):
+    """Fetch network interfaces in a background thread then update UI safely."""
+    def _fetch():
+        ips = get_local_ips()
+        def _update():
+            try:
+                if ips:
+                    options = [lbl for lbl, ip in ips]
+                    net_map.update({lbl: ip for lbl, ip in ips})
+                    dropdown_widget.config(values=options)
+                    net_var.set(options[0])
+                else:
+                    dropdown_widget.config(values=["No interfaces detected"])
+                    net_var.set("No interfaces detected")
+            except:
+                pass
+        try:
+            widget_ref.after(0, _update)
+        except:
+            pass
+    threading.Thread(target=_fetch, daemon=True).start()
+
 # ── ini helpers ───────────────────────────────────────────────────────────────
+_converted_ini_cache = set()
+
 def _convert_comments(ini_path):
-    with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
-        content = f.read()
-    converted = re.sub(r"^(\s*)//", r"\1#", content, flags=re.MULTILINE)
-    if converted != content:
-        with open(ini_path, "w", encoding="utf-8") as f:
-            f.write(converted)
+    """Convert // comments to # only once per session per file."""
+    if ini_path in _converted_ini_cache:
+        return
+    try:
+        with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        if "//" not in content:
+            _converted_ini_cache.add(ini_path)
+            return
+        converted = re.sub(r"^(\s*)//", r"\1#", content, flags=re.MULTILINE)
+        if converted != content:
+            with open(ini_path, "w", encoding="utf-8") as f:
+                f.write(converted)
+        _converted_ini_cache.add(ini_path)
+    except:
+        pass
 
 def get_ini_path(game_dir):
     return os.path.join(game_dir, INI_REL)
@@ -263,7 +315,7 @@ del "%~f0"
         return dest_exe, False
 
 def create_shortcut_windows(target, name, shortcut_types):
-    """Create Windows shortcuts using PowerShell."""
+    """Create Windows shortcuts using PowerShell. Non-blocking under Wine."""
     results = []
     for stype in shortcut_types:
         try:
@@ -278,7 +330,14 @@ $s = $ws.CreateShortcut('{dest}')
 $s.TargetPath = '{target}'
 $s.WorkingDirectory = '{os.path.dirname(target)}'
 $s.Save()'''
-            subprocess.run(["powershell", "-Command", ps], capture_output=True)
+            if WINE:
+                # Non-blocking under Wine — PowerShell is slow to spawn
+                subprocess.Popen(["powershell", "-Command", ps],
+                                 stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(["powershell", "-Command", ps],
+                               capture_output=True, timeout=10)
             results.append(stype)
         except:
             pass
@@ -477,16 +536,12 @@ class App(tk.Tk):
             frame = build_fn()
             frame.pack(fill="both", expand=True)
             self._current_frame = frame
-            self.update_idletasks()
-            self.geometry("")
 
     def _slide_out(self, old_frame, build_fn):
         old_frame.pack_forget()
         new_frame = build_fn()
         new_frame.pack(fill="both", expand=True)
         self._current_frame = new_frame
-        self.update_idletasks()
-        self.geometry("")
 
     # ── helpers ───────────────────────────────────────────────────────────────
     def _make_frame(self):
@@ -706,19 +761,30 @@ class App(tk.Tk):
             dlc = filedialog.askdirectory(title="Select Extracted Insurgency Pack DLC Folder")
             if not dlc:
                 return
-            try:
-                log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
-                copy_dlc_to_dir(dlc, self.game_dir)
-                log("DLC installed successfully.", game_dir=self.game_dir)
-                self._ok(status, "Insurgency Pack DLC installed.")
-            except Exception as e:
-                log_exception("DLC install failed", e, self.game_dir)
-                self._err(status, f"DLC install failed. Check debug log.")
+            dlc_btn.config(state="disabled", text="Installing...")
+            self._warn(status, "Copying DLC files, please wait...")
+            def _do():
+                try:
+                    log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
+                    copy_dlc_to_dir(dlc, self.game_dir)
+                    log("DLC installed successfully.", game_dir=self.game_dir)
+                    f.after(0, lambda: (
+                        dlc_btn.config(state="normal", text="📦  INSTALL INSURGENCY PACK DLC"),
+                        self._ok(status, "Insurgency Pack DLC installed.")
+                    ))
+                except Exception as e:
+                    log_exception("DLC install failed", e, self.game_dir)
+                    f.after(0, lambda: (
+                        dlc_btn.config(state="normal", text="📦  INSTALL INSURGENCY PACK DLC"),
+                        self._err(status, "DLC install failed. Check debug log.")
+                    ))
+            threading.Thread(target=_do, daemon=True).start()
 
         btn_row = tk.Frame(f, bg=BG)
         btn_row.pack(anchor="w", padx=20, pady=(8,0))
-        self._btn(btn_row, "📦  INSTALL INSURGENCY PACK DLC",
-                  install_dlc, bg="#1a222a", fg="#6fa8cf").pack(side="left")
+        dlc_btn = self._btn(btn_row, "📦  INSTALL INSURGENCY PACK DLC",
+                  install_dlc, bg="#1a222a", fg="#6fa8cf")
+        dlc_btn.pack(side="left")
 
         self._divider(f)
 
@@ -842,8 +908,7 @@ class App(tk.Tk):
         tk.Label(ip_row, text="ServerAddr :", font=FONT_BODY,
                  fg=DIM, bg=PANEL).pack(side="left")
 
-        current_ip = read_server_addr(self.game_dir) if self.game_dir else ""
-        ip_var = tk.StringVar(value=current_ip or "")
+        ip_var = tk.StringVar(value="")
         ip_entry = tk.Entry(ip_row, textvariable=ip_var,
                             font=FONT_MONO, bg=BG2, fg=ORANGE,
                             insertbackground=ORANGE, relief="flat",
@@ -856,18 +921,28 @@ class App(tk.Tk):
 
         ip_status = self._status_label(f)
 
+        def _load_ip():
+            try:
+                ip = read_server_addr(self.game_dir) if self.game_dir else ""
+                f.after(0, lambda: ip_var.set(ip))
+            except:
+                pass
+        threading.Thread(target=_load_ip, daemon=True).start()
+
         def save_ip():
             ip = ip_var.get().strip()
             if not ip:
                 self._warn(ip_status, "Enter an IP address.")
                 return
-            try:
-                write_server_addr(self.game_dir, ip)
-                log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
-                self._ok(ip_status, f"Saved  ServerAddr = {ip}")
-            except Exception as e:
-                log_exception("Save IP failed", e, self.game_dir)
-                self._err(ip_status, "Save failed. Check debug log.")
+            def _do():
+                try:
+                    write_server_addr(self.game_dir, ip)
+                    log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
+                    f.after(0, lambda: self._ok(ip_status, f"Saved  ServerAddr = {ip}"))
+                except Exception as e:
+                    log_exception("Save IP failed", e, self.game_dir)
+                    f.after(0, lambda: self._err(ip_status, "Save failed. Check debug log."))
+            threading.Thread(target=_do, daemon=True).start()
 
         save_row = tk.Frame(f, bg=BG)
         save_row.pack(anchor="w", padx=20, pady=(6,0))
@@ -880,7 +955,7 @@ class App(tk.Tk):
         self._btn(nav, "◀  BACK", lambda: self._show_step(3), bg=DIM2, fg=DIM).pack(side="left")
         self._btn(nav, "NEXT  ▶", lambda: self._show_step(5)).pack(side="right")
 
-        f.after(100, populate_nets)
+        populate_nets_async(f, net_var, net_map, net_dropdown)
         return f
 
     # ── Step 5: Shortcuts ─────────────────────────────────────────────────────
@@ -1014,8 +1089,7 @@ class App(tk.Tk):
         ip_bot.pack(fill="x", padx=8, pady=(0,8))
 
         tk.Label(ip_bot, text="ServerAddr :", font=FONT_BODY, fg=DIM, bg=PANEL).pack(side="left")
-        current_ip = read_server_addr(self.game_dir) if self._gd() else ""
-        ip_var = tk.StringVar(value=current_ip)
+        ip_var = tk.StringVar(value="")
         ip_entry = tk.Entry(ip_bot, textvariable=ip_var,
                             font=FONT_MONO, bg=BG2, fg=ORANGE,
                             insertbackground=ORANGE, relief="flat", width=20, bd=0,
@@ -1026,22 +1100,19 @@ class App(tk.Tk):
 
         ip_status = self._status_label(f)
 
+        def _load_ip_main():
+            try:
+                ip = read_server_addr(self.game_dir) if self._gd() else ""
+                f.after(0, lambda: ip_var.set(ip))
+            except:
+                pass
+        threading.Thread(target=_load_ip_main, daemon=True).start()
+
         def use_net():
             sel = net_var.get()
             if sel in net_map:
                 ip_var.set(net_map[sel])
                 self._ok(ip_status, "IP set from interface.")
-
-        def populate_nets():
-            ips = get_local_ips()
-            if ips:
-                options = [lbl for lbl,ip in ips]
-                net_map.update({lbl:ip for lbl,ip in ips})
-                net_dd.config(values=options)
-                net_var.set(options[0])
-            else:
-                net_dd.config(values=["No interfaces detected"])
-                net_var.set("No interfaces detected")
 
         use_net_btn = self._btn(ip_top, "USE", use_net)
         use_net_btn.pack(side="left")
@@ -1051,13 +1122,15 @@ class App(tk.Tk):
             if not ip:
                 self._warn(ip_status, "Enter an IP address.")
                 return
-            try:
-                write_server_addr(self.game_dir, ip)
-                log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
-                self._ok(ip_status, f"Saved  ServerAddr = {ip}")
-            except Exception as e:
-                log_exception("Save IP failed", e, self.game_dir)
-                self._err(ip_status, "Save failed.")
+            def _do():
+                try:
+                    write_server_addr(self.game_dir, ip)
+                    log(f"Saving ServerAddr = {ip}", game_dir=self.game_dir)
+                    f.after(0, lambda: self._ok(ip_status, f"Saved  ServerAddr = {ip}"))
+                except Exception as e:
+                    log_exception("Save IP failed", e, self.game_dir)
+                    f.after(0, lambda: self._err(ip_status, "Save failed."))
+            threading.Thread(target=_do, daemon=True).start()
 
         self._btn(ip_bot, "💾  SAVE", save_ip).pack(side="left")
 
@@ -1100,14 +1173,17 @@ class App(tk.Tk):
             dlc = filedialog.askdirectory(title="Select Extracted Insurgency Pack DLC Folder")
             if not dlc:
                 return
-            try:
-                log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
-                copy_dlc_to_dir(dlc, self.game_dir)
-                log("DLC installed.", game_dir=self.game_dir)
-                self._ok(dlc_status, "Insurgency Pack DLC installed.")
-            except Exception as e:
-                log_exception("DLC install failed", e, self.game_dir)
-                self._err(dlc_status, "DLC install failed.")
+            self._warn(dlc_status, "Copying DLC files, please wait...")
+            def _do():
+                try:
+                    log(f"Installing DLC from: {dlc}", game_dir=self.game_dir)
+                    copy_dlc_to_dir(dlc, self.game_dir)
+                    log("DLC installed.", game_dir=self.game_dir)
+                    f.after(0, lambda: self._ok(dlc_status, "Insurgency Pack DLC installed."))
+                except Exception as e:
+                    log_exception("DLC install failed", e, self.game_dir)
+                    f.after(0, lambda: self._err(dlc_status, "DLC install failed."))
+            threading.Thread(target=_do, daemon=True).start()
 
         # Launch row
         row1 = tk.Frame(f, bg=BG)
@@ -1205,7 +1281,7 @@ class App(tk.Tk):
         self._btn(log_row, "🗑  CLEAR LOG", clear_log,
                   bg=RED_HUD+"22", fg=RED_HUD).pack(side="left")
 
-        f.after(100, populate_nets)
+        populate_nets_async(f, net_var, net_map, net_dd)
         return f
 
 # ── entry ─────────────────────────────────────────────────────────────────────
