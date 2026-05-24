@@ -14,8 +14,8 @@ def resource_path(relative):
     base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, relative)
 
-INI_REL      = os.path.join("system", "scripts", "SplinterCellConviction.FusionFix.ini")
-EXE_REL      = os.path.join("system", "scc_lan_helper.exe")
+INI_REL      = os.path.join("src", "system", "scripts", "SplinterCellConviction.FusionFix.ini")
+EXE_REL      = os.path.join("src", "system", "scc_lan_helper.exe")
 SRC_DIR      = resource_path("src")
 LOG_FILE_NAME = "SCC_Launcher_debug.log"
 
@@ -72,58 +72,35 @@ def get_ini_path(game_dir):
 def get_exe_path(game_dir):
     return os.path.join(game_dir, EXE_REL)
 
-def _read_ini(ini_path):
-    """Read an ini file, stripping // comments that configparser can't handle."""
-    cfg = configparser.ConfigParser()
+def _convert_comments(ini_path):
+    """Convert // comments to # in-place so configparser can handle them."""
+    import re
     with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-    # Strip lines that start with // (C-style comments)
-    cleaned = "".join(l for l in lines if not l.strip().startswith("//"))
-    cfg.read_string(cleaned)
-    return cfg
+        content = f.read()
+    converted = re.sub(r"^(\s*)//", r"\1#", content, flags=re.MULTILINE)
+    if converted != content:
+        with open(ini_path, "w", encoding="utf-8") as f:
+            f.write(converted)
 
 def read_server_addr(game_dir):
     ini_path = get_ini_path(game_dir)
     if not os.path.exists(ini_path):
         return ""
-    cfg = _read_ini(ini_path)
+    _convert_comments(ini_path)
+    cfg = configparser.ConfigParser()
+    cfg.read(ini_path, encoding="utf-8")
     return cfg.get("LAN", "ServerAddr", fallback="")
 
 def write_server_addr(game_dir, ip):
     ini_path = get_ini_path(game_dir)
-    # Read raw lines so we preserve // comments and formatting
-    with open(ini_path, "r", encoding="utf-8", errors="ignore") as f:
-        lines = f.readlines()
-
-    new_lines = []
-    in_lan = False
-    written = False
-    for line in lines:
-        stripped = line.strip()
-        if stripped.lower() == "[lan]":
-            in_lan = True
-            new_lines.append(line)
-            continue
-        if stripped.startswith("[") and stripped.lower() != "[lan]":
-            in_lan = False
-        if in_lan and stripped.lower().startswith("serveraddr"):
-            new_lines.append(f"ServerAddr = {ip}\n")
-            written = True
-        else:
-            new_lines.append(line)
-
-    # If ServerAddr wasn't found, add it under [LAN]
-    if not written:
-        result = []
-        in_lan = False
-        for line in new_lines:
-            result.append(line)
-            if line.strip().lower() == "[lan]":
-                result.append(f"ServerAddr = {ip}\n")
-        new_lines = result
-
+    _convert_comments(ini_path)
+    cfg = configparser.ConfigParser()
+    cfg.read(ini_path, encoding="utf-8")
+    if not cfg.has_section("LAN"):
+        cfg.add_section("LAN")
+    cfg.set("LAN", "ServerAddr", ip)
     with open(ini_path, "w", encoding="utf-8") as f:
-        f.writelines(new_lines)
+        cfg.write(f)
 
 def copy_src_to_dir(dest):
     for item in os.listdir(SRC_DIR):
